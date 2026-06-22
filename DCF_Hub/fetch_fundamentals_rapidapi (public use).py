@@ -25,6 +25,7 @@ from datetime import datetime
 import os
 import time
 from dotenv import load_dotenv
+from etl_utils import fetch_with_retry, safe_float
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -74,18 +75,6 @@ def init_db(conn):
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
-def fetch_with_retry(fn, max_attempts=3, base_wait=5):
-    for attempt in range(max_attempts):
-        try:
-            return fn()
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                raise
-            wait = base_wait * (2 ** attempt)
-            print(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
-            time.sleep(wait)
-
-
 def api_get(endpoint, params):
     """Make one RapidAPI call with retry. Returns JSON or raises."""
     url = f"{BASE_URL}/{endpoint}"
@@ -111,11 +100,6 @@ def raw(data, key):
     return None
 
 
-def safe_float(val):
-    try:
-        return float(val) if val is not None else None
-    except:
-        return None
 
 
 # ── FETCH ONE TICKER ──────────────────────────────────────────────────────────

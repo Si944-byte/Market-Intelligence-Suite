@@ -32,9 +32,9 @@ import logging
 import sys
 import os
 import time
-import contextlib
 from datetime import datetime, date
 from dotenv import load_dotenv
+from etl_utils import managed_conn, fetch_with_retry, configure_logging
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
@@ -87,65 +87,12 @@ LOG_FILE = os.path.join(
 # LOGGING
 # ─────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ]
-)
-log = logging.getLogger(__name__)
-
-
-# ─────────────────────────────────────────────────────────────
-# DATABASE
-# ─────────────────────────────────────────────────────────────
-
-def get_connection():
-    conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={SQL_SERVER};"
-        f"DATABASE={SQL_DATABASE};"
-        f"UID={SQL_USER};"
-        f"PWD={SQL_PASSWORD};"
-        f"TrustServerCertificate=yes;"
-    )
-    return pyodbc.connect(conn_str)
-
-
-@contextlib.contextmanager
-def managed_conn(server, database, user, password):
-    conn = pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};"
-        f"UID={user};PWD={password};TrustServerCertificate=yes"
-    )
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+log = configure_logging(LOG_FILE, __name__)
 
 
 # ─────────────────────────────────────────────────────────────
 # FRED EXTRACTION
 # ─────────────────────────────────────────────────────────────
-
-def fetch_with_retry(fn, max_attempts=3, base_wait=5):
-    for attempt in range(max_attempts):
-        try:
-            return fn()
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                raise
-            wait = base_wait * (2 ** attempt)
-            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
-            time.sleep(wait)
 
 
 def fetch_fred(series_id: str, start: str, end: str) -> pd.DataFrame:

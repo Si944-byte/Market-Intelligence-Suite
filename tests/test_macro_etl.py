@@ -6,10 +6,6 @@ Covers:
   - pct_change_mom     (1-period % change)
   - to_monthly_first   (daily → monthly resampling)
   - classify_regime    (4-regime classification logic)
-
-Note: classify_regime is a nested closure inside build_master and cannot
-be imported directly. The logic is replicated here to document the
-expected behavior and catch future threshold regressions.
 """
 
 import numpy as np
@@ -86,68 +82,92 @@ class TestToMonthlyFirst:
 
 
 # ── classify_regime ───────────────────────────────────────────────────────────
-#
-# This function is a nested closure inside build_master() and cannot be
-# imported directly.  The logic is replicated verbatim so its business
-# rules are independently documented and can catch threshold drift.
-
-def classify_regime(row):
-    """Mirror of the nested classify_regime in build_master."""
-    cpi = row.get("cpi_smoothed")
-    gdp = row.get("gdp_smoothed")
-    if pd.isna(cpi) or pd.isna(gdp):
-        return None, None
-    if   cpi < 3.0  and gdp >= 2.0: return "Goldilocks",  1
-    elif cpi >= 3.0 and gdp >= 2.0: return "Inflation",   2
-    elif cpi >= 3.0 and gdp < 2.0:  return "Stagflation", 3
-    else:                            return "Recession",   4
 
 
 class TestClassifyRegime:
-    def test_goldilocks(self):
-        label, code = classify_regime({"cpi_smoothed": 2.0, "gdp_smoothed": 3.0})
-        assert label == "Goldilocks"
-        assert code == 1
+    def test_goldilocks(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.0, "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Goldilocks"
+        assert result["regime_code"] == 1
 
-    def test_inflation(self):
-        label, code = classify_regime({"cpi_smoothed": 4.0, "gdp_smoothed": 3.0})
-        assert label == "Inflation"
-        assert code == 2
+    def test_inflation(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 4.0, "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Inflation"
+        assert result["regime_code"] == 2
 
-    def test_stagflation(self):
-        label, code = classify_regime({"cpi_smoothed": 5.0, "gdp_smoothed": 1.0})
-        assert label == "Stagflation"
-        assert code == 3
+    def test_stagflation(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 5.0, "gdp_smoothed": 1.0}))
+        assert result["regime_label"] == "Stagflation"
+        assert result["regime_code"] == 3
 
-    def test_recession(self):
-        label, code = classify_regime({"cpi_smoothed": 1.5, "gdp_smoothed": 0.5})
-        assert label == "Recession"
-        assert code == 4
+    def test_recession(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 1.5, "gdp_smoothed": 0.5}))
+        assert result["regime_label"] == "Recession"
+        assert result["regime_code"] == 4
 
-    def test_nan_cpi_returns_none(self):
-        label, code = classify_regime({"cpi_smoothed": float("nan"), "gdp_smoothed": 3.0})
-        assert label is None
-        assert code is None
+    def test_nan_cpi_returns_unknown(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": float("nan"), "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Unknown"
+        assert result["regime_code"] == 0
 
-    def test_nan_gdp_returns_none(self):
-        label, code = classify_regime({"cpi_smoothed": 2.0, "gdp_smoothed": float("nan")})
-        assert label is None
-        assert code is None
+    def test_nan_gdp_returns_unknown(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.0, "gdp_smoothed": float("nan")}))
+        assert result["regime_label"] == "Unknown"
+        assert result["regime_code"] == 0
 
-    def test_boundary_cpi_3_gdp_2_is_inflation(self):
-        # cpi >= 3.0 AND gdp >= 2.0 → Inflation (not Goldilocks)
-        label, code = classify_regime({"cpi_smoothed": 3.0, "gdp_smoothed": 2.0})
-        assert label == "Inflation"
+    def test_boundary_cpi_3_gdp_2_is_inflation(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 3.0, "gdp_smoothed": 2.0}))
+        assert result["regime_label"] == "Inflation"
 
-    def test_boundary_cpi_2_9_gdp_2_is_goldilocks(self):
-        label, code = classify_regime({"cpi_smoothed": 2.9, "gdp_smoothed": 2.0})
-        assert label == "Goldilocks"
+    def test_boundary_cpi_2_9_gdp_2_is_goldilocks(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.9, "gdp_smoothed": 2.0}))
+        assert result["regime_label"] == "Goldilocks"
 
-    def test_boundary_cpi_3_gdp_1_9_is_stagflation(self):
-        label, code = classify_regime({"cpi_smoothed": 3.0, "gdp_smoothed": 1.9})
-        assert label == "Stagflation"
+    def test_boundary_cpi_3_gdp_1_9_is_stagflation(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 3.0, "gdp_smoothed": 1.9}))
+        assert result["regime_label"] == "Stagflation"
 
-    def test_boundary_cpi_2_9_gdp_1_9_is_recession(self):
-        # Falls through all conditions → else clause
-        label, code = classify_regime({"cpi_smoothed": 2.9, "gdp_smoothed": 1.9})
-        assert label == "Recession"
+    def test_boundary_cpi_2_9_gdp_1_9_is_recession(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.9, "gdp_smoothed": 1.9}))
+        assert result["regime_label"] == "Recession"
+
+    # ── 7 new tests (W4-3) ────────────────────────────────────────────────────
+
+    def test_goldilocks_at_canonical_inputs(self, macro):
+        """cpi=2.0, gdp=3.0 — both well inside Goldilocks quadrant."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.0, "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Goldilocks"
+        assert result["regime_code"] == 1
+
+    def test_inflation_mid_range(self, macro):
+        """cpi=4.0, gdp=3.0 — textbook inflation reading."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 4.0, "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Inflation"
+        assert result["regime_code"] == 2
+
+    def test_stagflation_mid_range(self, macro):
+        """cpi=4.0, gdp=1.0 — high inflation with weak growth."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 4.0, "gdp_smoothed": 1.0}))
+        assert result["regime_label"] == "Stagflation"
+        assert result["regime_code"] == 3
+
+    def test_recession_mid_range(self, macro):
+        """cpi=2.0, gdp=1.0 — low inflation, weak growth → Recession."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.0, "gdp_smoothed": 1.0}))
+        assert result["regime_label"] == "Recession"
+        assert result["regime_code"] == 4
+
+    def test_both_nan_returns_unknown(self, macro):
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": float("nan"), "gdp_smoothed": float("nan")}))
+        assert result["regime_label"] == "Unknown"
+        assert result["regime_code"] == 0
+
+    def test_boundary_cpi_3_high_gdp_is_inflation(self, macro):
+        """CPI exactly at 3.0 with GDP well above threshold → Inflation."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 3.0, "gdp_smoothed": 3.0}))
+        assert result["regime_label"] == "Inflation"
+
+    def test_boundary_gdp_at_2_low_cpi_is_goldilocks(self, macro):
+        """GDP exactly at 2.0 with CPI below threshold → Goldilocks."""
+        result = macro.classify_regime(pd.Series({"cpi_smoothed": 2.0, "gdp_smoothed": 2.0}))
+        assert result["regime_label"] == "Goldilocks"

@@ -29,8 +29,8 @@ import logging
 import sys
 import os
 import time
-import contextlib
 from dotenv import load_dotenv
+from etl_utils import managed_conn, fetch_with_retry, configure_logging
 
 # =============================================================================
 # CONFIG
@@ -66,48 +66,7 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sentiment_e
 # LOGGING
 # =============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-log = logging.getLogger(__name__)
-
-
-# =============================================================================
-# DATABASE CONNECTION
-# =============================================================================
-
-def get_conn():
-    conn_str = (
-        f"DRIVER={{{DRIVER}}};"
-        f"SERVER={SQL_SERVER};"
-        f"DATABASE={SQL_DATABASE};"
-        f"UID={SQL_USER};"
-        f"PWD={SQL_PASSWORD};"
-    )
-    return pyodbc.connect(conn_str)
-
-
-@contextlib.contextmanager
-def managed_conn(server, database, user, password):
-    conn = pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};"
-        f"UID={user};PWD={password};TrustServerCertificate=yes"
-    )
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+log = configure_logging(LOG_FILE, __name__)
 
 
 # =============================================================================
@@ -179,17 +138,6 @@ def create_tables(conn):
 # =============================================================================
 # FETCH HELPERS
 # =============================================================================
-
-def fetch_with_retry(fn, max_attempts=3, base_wait=5):
-    for attempt in range(max_attempts):
-        try:
-            return fn()
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                raise
-            wait = base_wait * (2 ** attempt)
-            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
-            time.sleep(wait)
 
 
 def fetch_fred(series_id, start_date=None):
@@ -465,6 +413,78 @@ def classify_sentiment(z) -> str:
     return "Extreme Greed"
 
 
+def upsert_sentiment_daily(conn, df):
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE #sd_stage (
+            date             DATE        NOT NULL PRIMARY KEY,
+            vix_close        FLOAT       NULL,
+            vix9d_close      FLOAT       NULL,
+            vix_term_ratio   FLOAT       NULL,
+            equity_pc_ratio  FLOAT       NULL,
+            fg_score         FLOAT       NULL,
+            fg_synthetic     FLOAT       NULL,
+            vix_zscore       FLOAT       NULL,
+            vix_term_zscore  FLOAT       NULL,
+            pc_zscore        FLOAT       NULL,
+            fg_zscore        FLOAT       NULL,
+            composite_zscore FLOAT       NULL,
+            sentiment_label  VARCHAR(20) NULL
+        )
+    """)
+
+    def n(val):
+        return None if pd.isna(val) else float(val)
+
+    rows = []
+    for idx_date, row in df.iterrows():
+        d = idx_date.date() if hasattr(idx_date, "date") else idx_date
+        rows.append((
+            d,
+            n(row["vix_close"]), n(row["vix9d_close"]),
+            n(row["vix_term_ratio"]), n(row["equity_pc_ratio"]),
+            n(row["fg_score"]), n(row["fg_synthetic"]),
+            n(row["vix_zscore"]), n(row["vix_term_zscore"]),
+            n(row["pc_zscore"]), n(row["fg_zscore"]),
+            n(row["composite_zscore"]), row["sentiment_label"],
+        ))
+
+    cursor.executemany(
+        "INSERT INTO #sd_stage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+
+    cursor.execute("""
+        MERGE sentiment_daily AS tgt
+        USING #sd_stage       AS src ON tgt.date = src.date
+        WHEN MATCHED THEN UPDATE SET
+            vix_close        = src.vix_close,
+            vix9d_close      = src.vix9d_close,
+            vix_term_ratio   = src.vix_term_ratio,
+            equity_pc_ratio  = src.equity_pc_ratio,
+            fg_score         = src.fg_score,
+            fg_synthetic     = src.fg_synthetic,
+            vix_zscore       = src.vix_zscore,
+            vix_term_zscore  = src.vix_term_zscore,
+            pc_zscore        = src.pc_zscore,
+            fg_zscore        = src.fg_zscore,
+            composite_zscore = src.composite_zscore,
+            sentiment_label  = src.sentiment_label
+        WHEN NOT MATCHED THEN INSERT (
+            date, vix_close, vix9d_close, vix_term_ratio, equity_pc_ratio,
+            fg_score, fg_synthetic, vix_zscore, vix_term_zscore, pc_zscore,
+            fg_zscore, composite_zscore, sentiment_label
+        ) VALUES (
+            src.date, src.vix_close, src.vix9d_close, src.vix_term_ratio, src.equity_pc_ratio,
+            src.fg_score, src.fg_synthetic, src.vix_zscore, src.vix_term_zscore, src.pc_zscore,
+            src.fg_zscore, src.composite_zscore, src.sentiment_label
+        );
+    """)
+
+    conn.commit()
+    log.info(f"  sentiment_daily upserted: {len(rows)} rows")
+
+
 def build_sentiment_master(conn):
     log.info("Building sentiment_daily master table...")
 
@@ -533,55 +553,9 @@ def build_sentiment_master(conn):
     df["sentiment_label"] = df["composite_zscore"].apply(classify_sentiment)
 
     # -------------------------------------------------------------------------
-    # Upsert into sentiment_daily
+    # Upsert into sentiment_daily — staging temp table + single MERGE
     # -------------------------------------------------------------------------
-    cursor = conn.cursor()
-    count  = 0
-
-    def n(val):
-        return None if pd.isna(val) else float(val)
-
-    for idx_date, row in df.iterrows():
-        d = idx_date.date() if hasattr(idx_date, "date") else idx_date
-
-        cursor.execute("""
-            IF EXISTS (SELECT 1 FROM sentiment_daily WHERE date = ?)
-                UPDATE sentiment_daily SET
-                    vix_close       = ?, vix9d_close     = ?,
-                    vix_term_ratio  = ?, equity_pc_ratio = ?,
-                    fg_score        = ?, fg_synthetic     = ?,
-                    vix_zscore      = ?, vix_term_zscore  = ?,
-                    pc_zscore       = ?, fg_zscore         = ?,
-                    composite_zscore = ?, sentiment_label = ?
-                WHERE date = ?
-            ELSE
-                INSERT INTO sentiment_daily (
-                    date, vix_close, vix9d_close, vix_term_ratio, equity_pc_ratio,
-                    fg_score, fg_synthetic, vix_zscore, vix_term_zscore, pc_zscore,
-                    fg_zscore, composite_zscore, sentiment_label
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        # UPDATE (12 values + WHERE)
-        d,
-        n(row["vix_close"]),       n(row["vix9d_close"]),
-        n(row["vix_term_ratio"]),  n(row["equity_pc_ratio"]),
-        n(row["fg_score"]),        n(row["fg_synthetic"]),
-        n(row["vix_zscore"]),      n(row["vix_term_zscore"]),
-        n(row["pc_zscore"]),       n(row["fg_zscore"]),
-        n(row["composite_zscore"]), row["sentiment_label"], d,
-        # INSERT (13 values)
-        d,
-        n(row["vix_close"]),       n(row["vix9d_close"]),
-        n(row["vix_term_ratio"]),  n(row["equity_pc_ratio"]),
-        n(row["fg_score"]),        n(row["fg_synthetic"]),
-        n(row["vix_zscore"]),      n(row["vix_term_zscore"]),
-        n(row["pc_zscore"]),       n(row["fg_zscore"]),
-        n(row["composite_zscore"]), row["sentiment_label"],
-        )
-        count += 1
-
-    conn.commit()
-    log.info(f"  sentiment_daily upserted: {count} rows")
+    upsert_sentiment_daily(conn, df)
 
     # Final summary
     latest_df = df.dropna(subset=["composite_zscore"])

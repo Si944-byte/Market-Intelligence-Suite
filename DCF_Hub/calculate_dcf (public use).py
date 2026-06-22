@@ -25,9 +25,9 @@ import pandas as pd
 import numpy as np
 import pyodbc
 import os
-import contextlib
 from datetime import datetime
 from dotenv import load_dotenv
+from etl_utils import managed_conn
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -205,85 +205,97 @@ def load_latest_fundamentals():
 
 # ── MAIN CALCULATION ──────────────────────────────────────────────────────────
 def run_calculations(df):
-    """Run all DCF calculations and assign tiers/signals."""
+    """Run all DCF calculations and assign tiers/signals using numpy broadcasting."""
     print(f"\n  Running DCF calculations for {len(df)} stocks...")
 
-    results = []
+    sector_arr   = df['sector'].fillna('Unknown').values
+    growth_arr   = np.array([SECTOR_ASSUMPTIONS.get(s, DEFAULT_ASSUMPTIONS)[0] for s in sector_arr])
+    discount_arr = np.array([SECTOR_ASSUMPTIONS.get(s, DEFAULT_ASSUMPTIONS)[1] for s in sector_arr])
 
-    for _, row in df.iterrows():
-        ticker  = row['ticker']
-        sector  = row['sector'] if row['sector'] else 'Unknown'
-        fcf     = row['fcf']
-        price   = row['current_price']
-        mkt_cap = row['market_cap']
+    fcf_arr    = pd.to_numeric(df['fcf'],           errors='coerce').values.astype(float)
+    price_arr  = pd.to_numeric(df['current_price'], errors='coerce').values.astype(float)
+    mktcap_arr = pd.to_numeric(df['market_cap'],    errors='coerce').values.astype(float)
 
-        # Get sector assumptions
-        growth_base, discount_base = SECTOR_ASSUMPTIONS.get(sector, DEFAULT_ASSUMPTIONS)
+    def _dcf_vec(fcf, growth, discount):
+        growth   = np.broadcast_to(np.asarray(growth,   dtype=float), fcf.shape).copy()
+        discount = np.broadcast_to(np.asarray(discount, dtype=float), fcf.shape).copy()
+        t = np.arange(1, DCF_YEARS + 1)
+        pv = fcf[:, None] * (1 + growth[:, None]) ** t / (1 + discount[:, None]) ** t
+        pv_sum = pv.sum(axis=1)
+        fcf_terminal   = fcf * (1 + growth) ** DCF_YEARS
+        terminal_value = (fcf_terminal * (1 + TERMINAL_GROWTH)) / (discount - TERMINAL_GROWTH)
+        pv_terminal    = terminal_value / (1 + discount) ** DCF_YEARS
+        result = pv_sum + pv_terminal
+        invalid = np.isnan(fcf) | (fcf == 0) | (discount <= TERMINAL_GROWTH)
+        result[invalid] = np.nan
+        return result
 
-        # ── Base Case DCF ────────────────────────────────────────────────────
-        base_total      = calculate_dcf(fcf, growth_base, discount_base)
-        base_iv_share   = intrinsic_per_share(base_total, mkt_cap, price)
-        base_gap        = valuation_gap(base_iv_share, price)
-        base_iv_total   = base_total
+    base_total_arr = _dcf_vec(fcf_arr, growth_arr,       discount_arr)
+    cons_total_arr = _dcf_vec(fcf_arr, SCENARIOS['Conservative'][0], SCENARIOS['Conservative'][1])
+    aggr_total_arr = _dcf_vec(fcf_arr, SCENARIOS['Aggressive'][0],   SCENARIOS['Aggressive'][1])
 
-        # ── Conservative DCF ─────────────────────────────────────────────────
-        g_cons, d_cons  = SCENARIOS['Conservative']
-        cons_total      = calculate_dcf(fcf, g_cons, d_cons)
-        cons_iv_share   = intrinsic_per_share(cons_total, mkt_cap, price)
-        cons_gap        = valuation_gap(cons_iv_share, price)
+    valid_price  = (price_arr > 0) & ~np.isnan(price_arr)
+    valid_mktcap = (mktcap_arr > 0) & ~np.isnan(mktcap_arr)
+    shares = np.where(valid_price & valid_mktcap, mktcap_arr / price_arr, np.nan)
 
-        # ── Aggressive DCF ───────────────────────────────────────────────────
-        g_aggr, d_aggr  = SCENARIOS['Aggressive']
-        aggr_total      = calculate_dcf(fcf, g_aggr, d_aggr)
-        aggr_iv_share   = intrinsic_per_share(aggr_total, mkt_cap, price)
-        aggr_gap        = valuation_gap(aggr_iv_share, price)
+    def _iv(total): return np.where(~np.isnan(total) & ~np.isnan(shares), total / shares, np.nan)
+    def _gap(iv):   return np.where(~np.isnan(iv) & valid_price, (iv - price_arr) / price_arr, np.nan)
 
-        # ── Derived fields ───────────────────────────────────────────────────
-        fcf_yield       = (fcf / mkt_cap) if (fcf and mkt_cap and mkt_cap > 0) else None
-        gap_dollars     = ((base_iv_share - price) * (mkt_cap / price)) if (
-                            base_iv_share and price and mkt_cap and price > 0) else None
+    base_iv_arr  = _iv(base_total_arr)
+    cons_iv_arr  = _iv(cons_total_arr)
+    aggr_iv_arr  = _iv(aggr_total_arr)
+    base_gap_arr = _gap(base_iv_arr)
+    cons_gap_arr = _gap(cons_iv_arr)
+    aggr_gap_arr = _gap(aggr_iv_arr)
 
-        quality_tier    = assign_quality_tier(
-                            row['profit_margin'],
-                            row['debt_to_equity'],
-                            sector
-                          )
-        signal          = assign_signal(base_gap)
+    signal_arr     = np.where(np.isnan(base_gap_arr), 'INSUFFICIENT DATA',
+                     np.where(base_gap_arr > 0.10, 'BUY',
+                     np.where(base_gap_arr < -0.10, 'SELL', 'HOLD')))
+    fcf_yield_arr  = np.where(valid_mktcap & ~np.isnan(fcf_arr), fcf_arr / mktcap_arr, np.nan)
+    gap_dollars_arr = np.where(~np.isnan(base_iv_arr) & valid_price & valid_mktcap,
+                               (base_iv_arr - price_arr) * (mktcap_arr / price_arr), np.nan)
 
-        results.append({
-            'Ticker':                    ticker,
-            'Company':                   row['company'],
-            'Sector':                    sector,
-            'Current_Price':             round(price, 4)          if price          else None,
-            'Intrinsic_Value_Per_Share': round(base_iv_share, 4)  if base_iv_share  else None,
-            'Intrinsic_Value_Total':     round(base_iv_total, 2)  if base_iv_total  else None,
-            'Valuation_Gap_Pct':         round(base_gap, 6)       if base_gap is not None else None,
-            'Valuation_Gap_Dollars':     round(gap_dollars, 2)    if gap_dollars    else None,
-            'Market_Cap':                mkt_cap,
-            'FCF':                       fcf,
-            'FCF_Yield_Pct':             round(fcf_yield, 6)      if fcf_yield      else None,
-            'Revenue':                   row['revenue'],
-            'Total_Debt':                row['total_debt'],
-            'Debt_to_Equity':            row['debt_to_equity'],
-            'Operating_Cash_Flow':       row['operating_cash_flow'],
-            'Capital_Expenditure':       row['capital_expenditure'],
-            'Profit_Margin':             row['profit_margin'],
-            'Operating_Margin':          row['operating_margin'],
-            'Week52_Low':                row['week52_low'],
-            'Week52_High':               row['week52_high'],
-            'Quality_Tier':              quality_tier,
-            'Signal':                    signal,
-            'DCF_Method':                row['dcf_method'],
-            'Sector_Growth_Rate':        growth_base,
-            'Sector_Discount_Rate':      discount_base,
-            'Conservative_IV':           round(cons_iv_share, 4)  if cons_iv_share  else None,
-            'Conservative_Gap':          round(cons_gap, 6)       if cons_gap is not None else None,
-            'Aggressive_IV':             round(aggr_iv_share, 4)  if aggr_iv_share  else None,
-            'Aggressive_Gap':            round(aggr_gap, 6)       if aggr_gap is not None else None,
-            'Data_Date':                 row['fetch_date'],
-        })
+    quality_tiers = df.apply(
+        lambda r: assign_quality_tier(r['profit_margin'], r['debt_to_equity'],
+                                      r['sector'] if r['sector'] else 'Unknown'),
+        axis=1,
+    ).values
 
-    return pd.DataFrame(results)
+    def _r(arr, dp):
+        return [None if np.isnan(float(v)) else round(float(v), dp) for v in arr]
+
+    return pd.DataFrame({
+        'Ticker':                    df['ticker'].values,
+        'Company':                   df['company'].values,
+        'Sector':                    sector_arr,
+        'Current_Price':             _r(price_arr, 4),
+        'Intrinsic_Value_Per_Share': _r(base_iv_arr, 4),
+        'Intrinsic_Value_Total':     _r(base_total_arr, 2),
+        'Valuation_Gap_Pct':         _r(base_gap_arr, 6),
+        'Valuation_Gap_Dollars':     _r(gap_dollars_arr, 2),
+        'Market_Cap':                df['market_cap'].values,
+        'FCF':                       df['fcf'].values,
+        'FCF_Yield_Pct':             _r(fcf_yield_arr, 6),
+        'Revenue':                   df['revenue'].values,
+        'Total_Debt':                df['total_debt'].values,
+        'Debt_to_Equity':            df['debt_to_equity'].values,
+        'Operating_Cash_Flow':       df['operating_cash_flow'].values,
+        'Capital_Expenditure':       df['capital_expenditure'].values,
+        'Profit_Margin':             df['profit_margin'].values,
+        'Operating_Margin':          df['operating_margin'].values,
+        'Week52_Low':                df['week52_low'].values,
+        'Week52_High':               df['week52_high'].values,
+        'Quality_Tier':              quality_tiers,
+        'Signal':                    signal_arr,
+        'DCF_Method':                df['dcf_method'].values,
+        'Sector_Growth_Rate':        growth_arr,
+        'Sector_Discount_Rate':      discount_arr,
+        'Conservative_IV':           _r(cons_iv_arr, 4),
+        'Conservative_Gap':          _r(cons_gap_arr, 6),
+        'Aggressive_IV':             _r(aggr_iv_arr, 4),
+        'Aggressive_Gap':            _r(aggr_gap_arr, 6),
+        'Data_Date':                 df['fetch_date'].values,
+    })
 
 
 # ── SQL SERVER CONNECTION ─────────────────────────────────────────────────────
@@ -297,23 +309,6 @@ def get_sql_connection():
         f"PWD={SQL_PASSWORD};"
     )
     return pyodbc.connect(conn_str)
-
-
-@contextlib.contextmanager
-def managed_conn(server, database, user, password):
-    conn = pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};"
-        f"UID={user};PWD={password};TrustServerCertificate=yes"
-    )
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 # ── WRITE TO SQL SERVER ───────────────────────────────────────────────────────

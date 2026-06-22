@@ -16,6 +16,11 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 
+# Ensure etl_utils (and config) at repo root are importable when ETL modules
+# do `from etl_utils import ...` at import time.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _load(slug: str, relpath: str):
     """

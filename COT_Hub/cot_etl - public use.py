@@ -12,7 +12,6 @@ Schedule: Friday 6:00 PM (after CFTC releases at ~3:30 PM ET)
 import os
 import io
 import time
-import contextlib
 import zipfile
 import requests
 import pandas as pd
@@ -22,6 +21,7 @@ import warnings
 import logging
 from datetime import datetime, date
 from dotenv import load_dotenv
+from etl_utils import managed_conn, fetch_with_retry, safe_int, safe_float, configure_logging
 
 warnings.filterwarnings("ignore")
 
@@ -136,48 +136,7 @@ def disagg_url(year):
 # LOGGING
 # ─────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-log = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────
-# SQL CONNECTION
-# ─────────────────────────────────────────────
-
-def get_conn():
-    conn_str = (
-        f"DRIVER={{{DRIVER}}};"
-        f"SERVER={SQL_SERVER};"
-        f"DATABASE={SQL_DATABASE};"
-        f"UID={SQL_USER};"
-        f"PWD={SQL_PASSWORD};"
-        "TrustServerCertificate=yes;"
-    )
-    return pyodbc.connect(conn_str)
-
-
-@contextlib.contextmanager
-def managed_conn(server, database, user, password):
-    conn = pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};"
-        f"UID={user};PWD={password};TrustServerCertificate=yes"
-    )
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+log = configure_logging(LOG_FILE, __name__)
 
 # ─────────────────────────────────────────────
 # SCHEMA CREATION (idempotent)
@@ -262,16 +221,9 @@ def create_tables(conn):
 # DOWNLOAD + PARSE CFTC ZIP
 # ─────────────────────────────────────────────
 
-def fetch_with_retry(fn, max_attempts=3, base_wait=5):
-    for attempt in range(max_attempts):
-        try:
-            return fn()
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                raise
-            wait = base_wait * (2 ** attempt)
-            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
-            time.sleep(wait)
+# Underscore aliases preserve backward-compat with internal call sites and tests
+_safe_int   = safe_int
+_safe_float = safe_float
 
 
 def download_zip(url):
@@ -505,26 +457,6 @@ def parse_disagg_zip(zip_bytes):
     return pd.DataFrame(result_rows)
 
 
-def _safe_int(val):
-    """Convert to int, return None on failure."""
-    if val is None:
-        return None
-    # Unwrap numpy scalars first
-    if hasattr(val, "item"):
-        val = val.item()
-    # Check for float NaN/inf before any conversion
-    if isinstance(val, float):
-        if np.isnan(val) or np.isinf(val):
-            return None
-        return int(val)
-    try:
-        # Handle string representations
-        cleaned = str(val).replace(",", "").strip()
-        if cleaned.lower() in ("nan", "inf", "-inf", "none", ""):
-            return None
-        return int(float(cleaned))
-    except Exception:
-        return None
 
 # ─────────────────────────────────────────────
 # FETCH ALL YEARS
@@ -841,14 +773,6 @@ def build_cot_master(conn):
 
 
 
-def _safe_float(val):
-    try:
-        f = float(val)
-        if np.isnan(f) or np.isinf(f):
-            return None
-        return round(f, 4)
-    except Exception:
-        return None
 
 
 def upsert_cot_weekly(conn, df):

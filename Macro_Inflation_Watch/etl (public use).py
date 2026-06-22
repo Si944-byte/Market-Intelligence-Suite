@@ -8,6 +8,8 @@ import yfinance as yf
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+from etl_utils import fetch_with_retry
+from config import MACRO
 
 # =============================================================
 # CONFIG
@@ -126,23 +128,12 @@ def pct_change_mom(series):
 
 def extract_fred(fred, series_id):
     print(f"  Pulling {series_id}...")
-    max_attempts = 3
-    base_wait    = 5
-    for attempt in range(max_attempts):
-        try:
-            s = fred.get_series(series_id, observation_start=START_DATE, observation_end=END_DATE)
-            df = pd.DataFrame(s, columns=["value"])
-            df.index.name = "date"
-            return to_monthly_first(df)
-        except Exception as e:
-            if attempt < max_attempts - 1:
-                wait = base_wait * (2 ** attempt)
-                print(f"  FRED error on {series_id} (attempt {attempt + 1}/{max_attempts}): {e}")
-                print(f"  Retrying in {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"  FRED failed on {series_id} after {max_attempts} attempts: {e}")
-                raise
+    def _fetch():
+        s = fred.get_series(series_id, observation_start=START_DATE, observation_end=END_DATE)
+        df = pd.DataFrame(s, columns=["value"])
+        df.index.name = "date"
+        return to_monthly_first(df)
+    return fetch_with_retry(_fetch)
 
 
 def extract_spx():
@@ -221,6 +212,21 @@ def load_raw_spx(engine, df):
 # BUILD MASTER TABLE
 # =============================================================
 
+def classify_regime(row):
+    """Classify macro regime from smoothed CPI and GDP values."""
+    cpi = row["cpi_smoothed"]
+    gdp = row["gdp_smoothed"]
+    if pd.isna(cpi) or pd.isna(gdp):
+        return pd.Series({"regime_label": "Unknown", "regime_code": 0})
+    if cpi < MACRO["cpi_threshold"] and gdp >= MACRO["gdp_threshold"]:
+        return pd.Series({"regime_label": "Goldilocks", "regime_code": 1})
+    if cpi >= MACRO["cpi_threshold"] and gdp >= MACRO["gdp_threshold"]:
+        return pd.Series({"regime_label": "Inflation", "regime_code": 2})
+    if cpi >= MACRO["cpi_threshold"] and gdp < MACRO["gdp_threshold"]:
+        return pd.Series({"regime_label": "Stagflation", "regime_code": 3})
+    return pd.Series({"regime_label": "Recession", "regime_code": 4})
+
+
 def build_master(engine):
     print("\nBuilding macro_monthly master table...")
 
@@ -264,19 +270,7 @@ def build_master(engine):
 
     df = df.rename(columns={"cpi": "cpi_level", "cpi_core": "cpi_core_level"})
 
-    def classify_regime(row):
-        cpi = row.get("cpi_smoothed")
-        gdp = row.get("gdp_smoothed")
-        if pd.isna(cpi) or pd.isna(gdp):
-            return None, None
-        if   cpi < 3.0  and gdp >= 2.0: return "Goldilocks",  1
-        elif cpi >= 3.0 and gdp >= 2.0: return "Inflation",   2
-        elif cpi >= 3.0 and gdp < 2.0:  return "Stagflation", 3
-        else:                            return "Recession",   4
-
-    df[["regime_label", "regime_code"]] = df.apply(
-        lambda r: pd.Series(classify_regime(r)), axis=1
-    )
+    df[["regime_label", "regime_code"]] = df.apply(classify_regime, axis=1)
 
     cols = [
         "cpi_level", "cpi_core_level", "cpi_mom_pct", "cpi_yoy_pct", "cpi_core_yoy_pct",
