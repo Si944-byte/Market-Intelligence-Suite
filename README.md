@@ -5,6 +5,7 @@
 ![Power BI](https://img.shields.io/badge/Power%20BI-Desktop%2FService-yellow?logo=powerbi)
 ![FRED](https://img.shields.io/badge/Data-FRED%20API-green)
 ![CFTC](https://img.shields.io/badge/Data-CFTC.gov-blue)
+![Tests](https://img.shields.io/badge/Tests-170%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/Status-Live%20%26%20Automated-brightgreen)
 
 A personal institutional-grade market intelligence system built for
@@ -161,11 +162,12 @@ producing an Overall Confluence score and Confluence Regime Display.
 
 | Layer | Technology |
 |-------|-----------|
-| ETL | Python 3 (pandas, requests, pyodbc, numpy, fredapi) |
-| Database | SQL Server 2019 (local instance,) |
+| ETL | Python 3 (pandas, requests, pyodbc, sqlalchemy, fredapi) |
+| Database | SQL Server 2019 (local instance) |
 | Visualization | Power BI Desktop + Power BI Service |
 | Automation | Windows Task Scheduler + Personal Gateway |
 | Data Sources | FRED API, RapidAPI (Yahoo Finance), CFTC.gov, CBOE |
+| Testing | pytest (170 tests) |
 
 ---
 
@@ -189,36 +191,68 @@ connecting to local SQL Server.
 
 ```
 market-intelligence-suite/
+├── COT_Hub/                 # COT positioning ETL
+├── DCF_Hub/                 # DCF valuation ETL (calculate + fetch_fundamentals)
 ├── Liquidity_Hub/           # Liquidity regime ETL
 ├── Macro_Inflation_Watch/   # Macro regime ETL
-├── COT_Hub/                 # COT positioning ETL
 ├── Sentiment_Hub/           # Sentiment ETL
-├── DCF_Hub/                 # DCF valuation ETL
-├── docs/                    # Dashboard guides
-└── skills/                  # Claude AI skills(example)
+├── tests/                   # pytest suite — 170 tests across all 6 ETL modules
+├── docs/                    # Architecture, data flow, and roadmap docs
+├── requirements.txt         # Pinned production dependencies
+├── requirements-test.txt    # pytest + test dependencies
+├── FIX_GUIDE.md             # Week 1 & 2 stabilization fix log
+└── TECHNICAL_DEBT.md        # Known issues and future work
 ```
 
 ---
 
 ## Setup
 
-Each ETL script requires Python 3.x and SQL Server 2019 with the
-corresponding database created. Install dependencies per dashboard:
+### 1. Install dependencies
 
 ```bash
-cd "COT Hub"
 pip install -r requirements.txt
 ```
 
-Configure credentials by replacing placeholder values in each ETL
-script before running:
+### 2. Configure credentials
 
-```python
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
-FRED_API_KEY = "YOUR_FRED_API_KEY"      # Liquidity, Macro
-RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"      # Macro, DCF
+Create a `.env` file in the project root (never commit this):
+
+```env
+SQL_SERVER=YOUR_SQL_SERVER
+SQL_USER=YOUR_SQL_USER
+SQL_PASSWORD=YOUR_SQL_PASSWORD
+FRED_API_KEY=YOUR_FRED_API_KEY
+RAPIDAPI_KEY=YOUR_RAPIDAPI_KEY
+DCF_DB_PATH=C:\path\to\sp500_prices.db
+DCF_TICKERS_PATH=C:\path\to\sp500_tickers.csv
+DCF_OUTPUT_PATH=C:\path\to\Stock_Data_Current.csv
 ```
+
+All six ETL scripts load credentials automatically via `python-dotenv` — no hardcoded values.
+
+### 3. Run tests
+
+```bash
+python -m pytest tests/ -v
+```
+
+All 170 tests should pass before running any ETL against a live database.
+
+---
+
+## ETL Reliability Features
+
+All six ETL scripts share a common set of production hardening patterns applied during the Week 1 & 2 stabilization pass:
+
+| Feature | Detail |
+|---------|--------|
+| Credentials via `.env` | No secrets in source code; `python-dotenv` loads at startup |
+| Transaction safety | TRUNCATE + INSERT wrapped in `BEGIN TRANSACTION` / `ROLLBACK` — partial writes are impossible |
+| Atomic DELETE + append | SQLAlchemy `engine.begin()` ensures DELETE and `to_sql` share one transaction |
+| Exponential backoff retry | External API calls retry up to 3 times: 5s → 10s → 20s waits |
+| Connection context manager | `managed_conn()` auto-commits on success, rolls back on exception, always closes |
+| Leading-zero CFTC codes | `pd.read_csv(..., dtype=str)` preserves codes like `043602` (ZN) that integer parsing would drop |
 
 ---
 
