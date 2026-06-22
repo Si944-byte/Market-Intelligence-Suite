@@ -10,7 +10,7 @@ ETL pipeline for the DCF Valuation Dashboard.
 All 503 S&P 500 constituents. Full DCF per stock.
 
 ## Framework
-Three Pillars: Valuation and Research Engine, Stress-Testing Engine
+Three Pillars: Valuation, Research Engine and Stress-Testing Engine
 
 ## Key Outputs
 - Valuation gap (DCF vs market price)
