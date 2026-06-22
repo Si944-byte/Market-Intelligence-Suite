@@ -11,6 +11,8 @@ Schedule: Friday 6:00 PM (after CFTC releases at ~3:30 PM ET)
 
 import os
 import io
+import time
+import contextlib
 import zipfile
 import requests
 import pandas as pd
@@ -19,6 +21,7 @@ import pyodbc
 import warnings
 import logging
 from datetime import datetime, date
+from dotenv import load_dotenv
 
 warnings.filterwarnings("ignore")
 
@@ -26,10 +29,12 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # ─────────────────────────────────────────────
 
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_DATABASE = "COTRegime"
-SQL_USER     = "YOUR_SQL_USER"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
+load_dotenv()
+
+SQL_SERVER   = os.environ.get("SQL_SERVER",   "YOUR_SQL_SERVER")
+SQL_DATABASE = os.environ.get("SQL_DATABASE", "COTRegime")
+SQL_USER     = os.environ.get("SQL_USER",     "YOUR_SQL_USER")
+SQL_PASSWORD = os.environ.get("SQL_PASSWORD", "YOUR_SQL_PASSWORD")
 DRIVER       = "ODBC Driver 17 for SQL Server"
 
 LOG_FILE     = "cot_etl_log.txt"
@@ -157,6 +162,23 @@ def get_conn():
     )
     return pyodbc.connect(conn_str)
 
+
+@contextlib.contextmanager
+def managed_conn(server, database, user, password):
+    conn = pyodbc.connect(
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};DATABASE={database};"
+        f"UID={user};PWD={password};TrustServerCertificate=yes"
+    )
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 # ─────────────────────────────────────────────
 # SCHEMA CREATION (idempotent)
 # ─────────────────────────────────────────────
@@ -240,15 +262,29 @@ def create_tables(conn):
 # DOWNLOAD + PARSE CFTC ZIP
 # ─────────────────────────────────────────────
 
+def fetch_with_retry(fn, max_attempts=3, base_wait=5):
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = base_wait * (2 ** attempt)
+            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+
 def download_zip(url):
-    """Download a CFTC ZIP and return as BytesIO. Returns None on failure."""
-    try:
-        log.info(f"  Downloading: {url}")
+    """Download a CFTC ZIP and return as BytesIO. Returns None after retries exhausted."""
+    log.info(f"  Downloading: {url}")
+    def _fetch():
         r = requests.get(url, timeout=60)
         r.raise_for_status()
         return io.BytesIO(r.content)
+    try:
+        return fetch_with_retry(_fetch)
     except Exception as e:
-        log.warning(f"  Download failed: {url} — {e}")
+        log.warning(f"  Download failed after retries: {url} — {e}")
         return None
 
 
@@ -265,7 +301,7 @@ def parse_legacy_zip(zip_bytes):
             log.warning("  No .txt file found in legacy ZIP")
             return pd.DataFrame()
         with zf.open(txt_name[0]) as f:
-            df = pd.read_csv(f, low_memory=False)
+            df = pd.read_csv(f, low_memory=False, dtype=str)
 
     # Standardize column names (strip whitespace)
     df.columns = [c.strip() for c in df.columns]
@@ -382,7 +418,7 @@ def parse_disagg_zip(zip_bytes):
             log.warning("  No .txt file found in disagg ZIP")
             return pd.DataFrame()
         with zf.open(txt_name[0]) as f:
-            df = pd.read_csv(f, low_memory=False)
+            df = pd.read_csv(f, low_memory=False, dtype=str)
 
     df.columns = [c.strip() for c in df.columns]
 
@@ -549,11 +585,6 @@ def upsert_raw_cot(conn, df):
     if df.empty:
         return
     cursor = conn.cursor()
-    # Truncate first — ensures stale rows with null position data are wiped.
-    # MERGE alone won't fix rows that were inserted with nulls; we need clean slate.
-    cursor.execute("TRUNCATE TABLE raw_cot")
-    conn.commit()
-    log.info("raw_cot truncated — reinserting fresh data")
     sql = """
         MERGE raw_cot AS target
         USING (VALUES (
@@ -613,9 +644,16 @@ def upsert_raw_cot(conn, df):
         "other_long", "other_short",
     ]
     rows = [tuple(row[c] for c in cols) for _, row in df[cols].iterrows()]
-    cursor.executemany(sql, rows)
-    conn.commit()
-    log.info(f"raw_cot upserted: {len(rows)} rows")
+    try:
+        cursor.execute("BEGIN TRANSACTION")
+        cursor.execute("TRUNCATE TABLE raw_cot")
+        cursor.executemany(sql, rows)
+        conn.commit()
+        log.info(f"raw_cot rebuilt: {len(rows)} rows")
+    except Exception:
+        conn.rollback()
+        log.error("raw_cot upsert failed — rolled back")
+        raise
 
 # ─────────────────────────────────────────────
 # BUILD cot_weekly MASTER TABLE
@@ -647,12 +685,6 @@ def build_cot_master(conn):
     then upsert into cot_weekly.
     """
     log.info("Building cot_weekly master table...")
-
-    # Truncate cot_weekly so stale rows don't persist after a raw_cot refresh
-    cursor = conn.cursor()
-    cursor.execute("TRUNCATE TABLE cot_weekly")
-    conn.commit()
-    log.info("cot_weekly truncated — rebuilding from raw_cot")
 
     df = pd.read_sql("SELECT * FROM raw_cot ORDER BY cftc_code, report_date", conn)
 
@@ -770,7 +802,16 @@ def build_cot_master(conn):
     # Any pre-upsert pandas sanitization destroys valid float values in
     # mixed None/float columns by coercing None→NaN→None chain.
 
-    upsert_cot_weekly(conn, out_df)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN TRANSACTION")
+        cursor.execute("TRUNCATE TABLE cot_weekly")
+        log.info("cot_weekly truncated — rebuilding from raw_cot")
+        upsert_cot_weekly(conn, out_df)
+    except Exception:
+        conn.rollback()
+        log.error("cot_weekly rebuild failed — rolled back")
+        raise
 
     # Log current positioning snapshot
     log.info("── Current Positioning Snapshot ──────────────────────────")
@@ -1211,40 +1252,37 @@ def main():
         log.info("Mode: REBUILD MASTER ONLY (skipping download)")
     log.info("=" * 60)
 
-    # 1. Connect
+    # 1. Connect + run pipeline
     log.info("Connecting to SQL Server...")
-    conn = get_conn()
-    log.info(f"Connected: {SQL_SERVER} / {SQL_DATABASE}")
+    with managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD) as conn:
+        log.info(f"Connected: {SQL_SERVER} / {SQL_DATABASE}")
 
-    # 2. Schema
-    create_tables(conn)
+        # 2. Schema
+        create_tables(conn)
 
-    if not args.rebuild_master_only:
-        # 3. Download + parse all years
-        raw_df = fetch_all_years()
-        if raw_df.empty:
-            log.error("No data retrieved — ETL aborted")
-            conn.close()
-            return
+        if not args.rebuild_master_only:
+            # 3. Download + parse all years
+            raw_df = fetch_all_years()
+            if raw_df.empty:
+                log.error("No data retrieved — ETL aborted")
+                return
 
-        # 4. Upsert raw staging
-        upsert_raw_cot(conn, raw_df)
-    else:
-        log.info("Skipping download — using existing raw_cot data")
+            # 4. Upsert raw staging
+            upsert_raw_cot(conn, raw_df)
+        else:
+            log.info("Skipping download — using existing raw_cot data")
 
-    # 5. Build master fact table
-    build_cot_master(conn)
+        # 5. Build master fact table
+        build_cot_master(conn)
 
-    # 6. Create / refresh SQL views
-    create_views(conn)
+        # 6. Create / refresh SQL views
+        create_views(conn)
 
-    # 7. Add primary_zscore computed column if not exists
-    add_primary_zscore_column(conn)
+        # 7. Add primary_zscore computed column if not exists
+        add_primary_zscore_column(conn)
 
-    # 8. Validate data quality
-    validate_cot_weekly(conn)
-
-    conn.close()
+        # 8. Validate data quality
+        validate_cot_weekly(conn)
 
     log.info("=" * 60)
     log.info(f"COT ETL COMPLETE  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

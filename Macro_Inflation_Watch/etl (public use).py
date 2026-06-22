@@ -7,18 +7,21 @@ from fredapi import Fred
 import yfinance as yf
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
 
 # =============================================================
 # CONFIG
 # =============================================================
 
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_DATABASE = "MacroRegime"
-SQL_USER     = "macro_user"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
-FRED_API_KEY = "YOUR_FRED_API_KEY"
+load_dotenv()
 
-RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
+SQL_SERVER   = os.environ.get("SQL_SERVER",   "YOUR_SQL_SERVER")
+SQL_DATABASE = os.environ.get("SQL_DATABASE", "MacroRegime")
+SQL_USER     = os.environ.get("SQL_USER",     "macro_user")
+SQL_PASSWORD = os.environ.get("SQL_PASSWORD", "YOUR_SQL_PASSWORD")
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
+
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "YOUR_RAPIDAPI_KEY")
 
 START_DATE = "2010-01-01"
 END_DATE   = datetime.today().strftime("%Y-%m-%d")
@@ -124,7 +127,7 @@ def pct_change_mom(series):
 def extract_fred(fred, series_id):
     print(f"  Pulling {series_id}...")
     max_attempts = 3
-    retry_wait   = 30
+    base_wait    = 5
     for attempt in range(max_attempts):
         try:
             s = fred.get_series(series_id, observation_start=START_DATE, observation_end=END_DATE)
@@ -133,9 +136,10 @@ def extract_fred(fred, series_id):
             return to_monthly_first(df)
         except Exception as e:
             if attempt < max_attempts - 1:
+                wait = base_wait * (2 ** attempt)
                 print(f"  FRED error on {series_id} (attempt {attempt + 1}/{max_attempts}): {e}")
-                print(f"  Retrying in {retry_wait}s...")
-                time.sleep(retry_wait)
+                print(f"  Retrying in {wait}s...")
+                time.sleep(wait)
             else:
                 print(f"  FRED failed on {series_id} after {max_attempts} attempts: {e}")
                 raise
@@ -187,7 +191,7 @@ def load_raw_cpi(engine, cpi_frames):
     df_out = pd.DataFrame(rows).dropna()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM raw_cpi"))
-    df_out.to_sql("raw_cpi", engine, if_exists="append", index=False)
+        df_out.to_sql("raw_cpi", conn, if_exists="append", index=False)
     print(f"  raw_cpi loaded: {len(df_out)} rows")
 
 
@@ -198,7 +202,7 @@ def load_raw_single(engine, table, df):
     df_clean.columns = ["date", "value"]
     with engine.begin() as conn:
         conn.execute(text(f"DELETE FROM {table}"))
-    df_clean.to_sql(table, engine, if_exists="append", index=False)
+        df_clean.to_sql(table, conn, if_exists="append", index=False)
     print(f"  {table} loaded: {len(df_clean)} rows")
 
 
@@ -209,7 +213,7 @@ def load_raw_spx(engine, df):
     df_clean.columns = ["date", "spx_close"]
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM raw_spx"))
-    df_clean.to_sql("raw_spx", engine, if_exists="append", index=False)
+        df_clean.to_sql("raw_spx", conn, if_exists="append", index=False)
     print(f"  raw_spx loaded: {len(df_clean)} rows")
 
 
@@ -293,7 +297,7 @@ def build_master(engine):
 
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM macro_monthly"))
-    df.to_sql("macro_monthly", engine, if_exists="append", index=False)
+        df.to_sql("macro_monthly", conn, if_exists="append", index=False)
 
     print(f"  macro_monthly built: {len(df)} rows")
     print(f"  Regime distribution:\n{df['regime_label'].value_counts().to_string()}")

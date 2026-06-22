@@ -1,5 +1,6 @@
 # Logs and output files
 *.txt
+!requirements*.txt
 *.log
 liquidity_etl_log.txt
 cot_etl_log.txt

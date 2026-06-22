@@ -1,0 +1,8 @@
+requests==2.32.3
+pandas==2.3.2
+numpy==2.1.2
+pyodbc==5.3.0
+sqlalchemy==2.0.48
+fredapi==0.5.2
+yfinance==0.2.55
+python-dotenv==1.2.2

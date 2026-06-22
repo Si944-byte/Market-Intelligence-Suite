@@ -25,16 +25,20 @@ import pandas as pd
 import numpy as np
 import pyodbc
 import os
+import contextlib
 from datetime import datetime
+from dotenv import load_dotenv
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-DB_PATH     = r"C:\Users\TJs PC\OneDrive\Desktop\Projects\DCF Models\sp500_prices.db"
-OUTPUT_PATH = r"C:\Users\TJs PC\OneDrive\Desktop\Projects\DCF Models\Stock_Data_Current.csv"
+load_dotenv()
 
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_DATABASE = "DCFRegime"
-SQL_USER     = "dcf_user"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
+DB_PATH     = os.environ.get("DCF_DB_PATH",     r".\sp500_prices.db")
+OUTPUT_PATH = os.environ.get("DCF_OUTPUT_PATH", r".\Stock_Data_Current.csv")
+
+SQL_SERVER   = os.environ.get("SQL_SERVER",   "YOUR_SQL_SERVER")
+SQL_DATABASE = os.environ.get("SQL_DATABASE", "DCFRegime")
+SQL_USER     = os.environ.get("SQL_USER",     "dcf_user")
+SQL_PASSWORD = os.environ.get("SQL_PASSWORD", "YOUR_SQL_PASSWORD")
 
 TERMINAL_GROWTH = 0.025
 DCF_YEARS       = 5
@@ -295,6 +299,23 @@ def get_sql_connection():
     return pyodbc.connect(conn_str)
 
 
+@contextlib.contextmanager
+def managed_conn(server, database, user, password):
+    conn = pyodbc.connect(
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};DATABASE={database};"
+        f"UID={user};PWD={password};TrustServerCertificate=yes"
+    )
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ── WRITE TO SQL SERVER ───────────────────────────────────────────────────────
 def write_to_sql(df):
     """
@@ -304,9 +325,6 @@ def write_to_sql(df):
     Inserts in batches of 100 for performance.
     """
     print(f"\n  Writing {len(df)} rows to SQL Server DCFRegime...")
-
-    conn   = get_sql_connection()
-    cursor = conn.cursor()
 
     insert_sql = """
         INSERT INTO dbo.dcf_results (
@@ -332,47 +350,46 @@ def write_to_sql(df):
     skipped  = 0
     errors   = []
 
-    for _, row in df.iterrows():
-        try:
-            def v(col):
-                val = row.get(col)
-                if val is None:
-                    return None
-                try:
-                    if np.isnan(val):
+    with managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD) as conn:
+        cursor = conn.cursor()
+
+        for _, row in df.iterrows():
+            try:
+                def v(col):
+                    val = row.get(col)
+                    if val is None:
                         return None
-                except:
-                    pass
-                return val
+                    try:
+                        if np.isnan(val):
+                            return None
+                    except:
+                        pass
+                    return val
 
-            params = (
-                v('Data_Date'), v('Ticker'), v('Company'), v('Sector'),
-                v('Current_Price'), v('Intrinsic_Value_Per_Share'), v('Intrinsic_Value_Total'),
-                v('Valuation_Gap_Pct'), v('Valuation_Gap_Dollars'),
-                v('Market_Cap'), v('FCF'), v('FCF_Yield_Pct'), v('Revenue'), v('Total_Debt'),
-                v('Debt_to_Equity'), v('Operating_Cash_Flow'), v('Capital_Expenditure'),
-                v('Profit_Margin'), v('Operating_Margin'), v('Week52_Low'), v('Week52_High'),
-                v('Quality_Tier'), v('Signal'), v('DCF_Method'),
-                v('Sector_Growth_Rate'), v('Sector_Discount_Rate'),
-                v('Conservative_IV'), v('Conservative_Gap'),
-                v('Aggressive_IV'), v('Aggressive_Gap'),
-                # WHERE NOT EXISTS params
-                v('Data_Date'), v('Ticker')
-            )
+                params = (
+                    v('Data_Date'), v('Ticker'), v('Company'), v('Sector'),
+                    v('Current_Price'), v('Intrinsic_Value_Per_Share'), v('Intrinsic_Value_Total'),
+                    v('Valuation_Gap_Pct'), v('Valuation_Gap_Dollars'),
+                    v('Market_Cap'), v('FCF'), v('FCF_Yield_Pct'), v('Revenue'), v('Total_Debt'),
+                    v('Debt_to_Equity'), v('Operating_Cash_Flow'), v('Capital_Expenditure'),
+                    v('Profit_Margin'), v('Operating_Margin'), v('Week52_Low'), v('Week52_High'),
+                    v('Quality_Tier'), v('Signal'), v('DCF_Method'),
+                    v('Sector_Growth_Rate'), v('Sector_Discount_Rate'),
+                    v('Conservative_IV'), v('Conservative_Gap'),
+                    v('Aggressive_IV'), v('Aggressive_Gap'),
+                    # WHERE NOT EXISTS params
+                    v('Data_Date'), v('Ticker')
+                )
 
-            cursor.execute(insert_sql, params)
+                cursor.execute(insert_sql, params)
 
-            if cursor.rowcount > 0:
-                inserted += 1
-            else:
-                skipped += 1
+                if cursor.rowcount > 0:
+                    inserted += 1
+                else:
+                    skipped += 1
 
-        except Exception as e:
-            errors.append(f"{row.get('Ticker', '?')}: {e}")
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+            except Exception as e:
+                errors.append(f"{row.get('Ticker', '?')}: {e}")
 
     print(f"  Inserted: {inserted} new rows")
     print(f"  Skipped:  {skipped} already existed for this date")

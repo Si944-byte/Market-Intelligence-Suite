@@ -24,11 +24,14 @@ import pandas as pd
 from datetime import datetime
 import os
 import time
+from dotenv import load_dotenv
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
-DB_PATH      = r"C:\Users\TJs PC\OneDrive\Desktop\Projects\DCF Models\sp500_prices.db"
-TICKERS_PATH = r"C:\Users\TJs PC\OneDrive\Desktop\Projects\DCF Models\sp500_tickers.csv"
+load_dotenv()
+
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY",    "YOUR_RAPIDAPI_KEY")
+DB_PATH      = os.environ.get("DCF_DB_PATH",     r".\sp500_prices.db")
+TICKERS_PATH = os.environ.get("DCF_TICKERS_PATH", r".\sp500_tickers.csv")
 
 FINANCIAL_SECTORS = {'Financials'}
 PAUSE_PER_TICKER  = 0.75  # Seconds between tickers
@@ -71,12 +74,26 @@ def init_db(conn):
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
+def fetch_with_retry(fn, max_attempts=3, base_wait=5):
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = base_wait * (2 ** attempt)
+            print(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+
 def api_get(endpoint, params):
-    """Make one RapidAPI call. Returns JSON or raises."""
-    url  = f"{BASE_URL}/{endpoint}"
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    """Make one RapidAPI call with retry. Returns JSON or raises."""
+    url = f"{BASE_URL}/{endpoint}"
+    def _fetch():
+        resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    return fetch_with_retry(_fetch)
 
 
 def raw(data, key):

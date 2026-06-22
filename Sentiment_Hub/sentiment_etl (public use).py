@@ -28,18 +28,23 @@ from datetime import datetime, date
 import logging
 import sys
 import os
+import time
+import contextlib
+from dotenv import load_dotenv
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_DATABASE = "SentimentRegime"
-SQL_USER     = "macro_user"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
+load_dotenv()
+
+SQL_SERVER   = os.environ.get("SQL_SERVER",   "YOUR_SQL_SERVER")
+SQL_DATABASE = os.environ.get("SQL_DATABASE", "SentimentRegime")
+SQL_USER     = os.environ.get("SQL_USER",     "macro_user")
+SQL_PASSWORD = os.environ.get("SQL_PASSWORD", "YOUR_SQL_PASSWORD")
 DRIVER       = "ODBC Driver 17 for SQL Server"
 
-FRED_API_KEY = "YOUR_FRED_API_KEY"
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
 FRED_BASE    = "https://api.stlouisfed.org/fred/series/observations"
 
 # Archive CSV: 2006-11-01 through 2019-10-04 (CBOE discontinued free daily updates)
@@ -86,6 +91,23 @@ def get_conn():
         f"PWD={SQL_PASSWORD};"
     )
     return pyodbc.connect(conn_str)
+
+
+@contextlib.contextmanager
+def managed_conn(server, database, user, password):
+    conn = pyodbc.connect(
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};DATABASE={database};"
+        f"UID={user};PWD={password};TrustServerCertificate=yes"
+    )
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -158,6 +180,18 @@ def create_tables(conn):
 # FETCH HELPERS
 # =============================================================================
 
+def fetch_with_retry(fn, max_attempts=3, base_wait=5):
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = base_wait * (2 ** attempt)
+            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+
 def fetch_fred(series_id, start_date=None):
     """Pull a FRED series and return a date-indexed Series."""
     if start_date is None:
@@ -170,9 +204,11 @@ def fetch_fred(series_id, start_date=None):
         "observation_start": start_date,
         "observation_end":   date.today().isoformat(),
     }
-    r = requests.get(FRED_BASE, params=params, timeout=30)
-    r.raise_for_status()
-    obs = r.json().get("observations", [])
+    def _fetch():
+        r = requests.get(FRED_BASE, params=params, timeout=30)
+        r.raise_for_status()
+        return r.json().get("observations", [])
+    obs = fetch_with_retry(_fetch)
     records = []
     for o in obs:
         try:
@@ -201,9 +237,11 @@ def fetch_cboe_putcall():
     # ------------------------------------------------------------------
     df_archive = pd.DataFrame(columns=["date", "pc_ratio"])
     try:
-        r1 = requests.get(CBOE_ARCHIVE_URL, timeout=30)
-        r1.raise_for_status()
-        lines = r1.text.splitlines()
+        def _fetch_archive():
+            r = requests.get(CBOE_ARCHIVE_URL, timeout=30)
+            r.raise_for_status()
+            return r.text
+        lines = fetch_with_retry(_fetch_archive).splitlines()
         header_idx = next(
             i for i, l in enumerate(lines) if l.strip().startswith("DATE")
         )
@@ -233,9 +271,11 @@ def fetch_cboe_putcall():
                 "Chrome/122.0.0.0 Safari/537.36"
             )
         }
-        r2 = requests.get(CBOE_DAILY_STATS_URL, headers=headers, timeout=30)
-        r2.raise_for_status()
-        tables = pd.read_html(StringIO(r2.text), flavor="html5lib")
+        def _fetch_current():
+            r = requests.get(CBOE_DAILY_STATS_URL, headers=headers, timeout=30)
+            r.raise_for_status()
+            return r.text
+        tables = pd.read_html(StringIO(fetch_with_retry(_fetch_current)), flavor="html5lib")
         log.info(f"  Daily stats page: found {len(tables)} table(s)")
 
         matched = None
@@ -311,9 +351,11 @@ def fetch_fear_greed():
         "Referer":    "https://edition.cnn.com/markets/fear-and-greed",
     }
     try:
-        r = requests.get(CNN_FG_URL, headers=headers, timeout=20)
-        r.raise_for_status()
-        data = r.json()
+        def _fetch_cnn():
+            r = requests.get(CNN_FG_URL, headers=headers, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        data = fetch_with_retry(_fetch_cnn)
         historical = data.get("fear_and_greed_historical", {}).get("data", [])
         if not historical:
             raise ValueError("No historical data in CNN response")
@@ -599,48 +641,47 @@ def main():
     # 2. Connect and ensure schema
     # ------------------------------------------------------------------
     try:
-        conn = get_conn()
-        log.info("SQL Server connection established.")
+        conn_ctx = managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD)
     except Exception as e:
         log.critical(f"Cannot connect to SQL Server: {e}")
         sys.exit(1)
 
-    create_tables(conn)
+    with conn_ctx as conn:
+        log.info("SQL Server connection established.")
+        create_tables(conn)
 
-    # ------------------------------------------------------------------
-    # 3. Upsert raw staging tables
-    # ------------------------------------------------------------------
-    if not vix.empty:
+        # ------------------------------------------------------------------
+        # 3. Upsert raw staging tables
+        # ------------------------------------------------------------------
+        if not vix.empty:
+            try:
+                upsert_vix(conn, vix, vix9d)
+            except Exception as e:
+                log.error(f"raw_vix upsert error: {e}")
+                errors.append("raw_vix upsert failed")
+
+        if not pc.empty:
+            try:
+                upsert_putcall(conn, pc)
+            except Exception as e:
+                log.error(f"raw_putcall upsert error: {e}")
+                errors.append("raw_putcall upsert failed")
+
+        if fg is not None:
+            try:
+                upsert_fear_greed(conn, fg)
+            except Exception as e:
+                log.error(f"raw_fear_greed upsert error: {e}")
+                errors.append("raw_fear_greed upsert failed")
+
+        # ------------------------------------------------------------------
+        # 4. Build master sentiment table
+        # ------------------------------------------------------------------
         try:
-            upsert_vix(conn, vix, vix9d)
+            build_sentiment_master(conn)
         except Exception as e:
-            log.error(f"raw_vix upsert error: {e}")
-            errors.append("raw_vix upsert failed")
-
-    if not pc.empty:
-        try:
-            upsert_putcall(conn, pc)
-        except Exception as e:
-            log.error(f"raw_putcall upsert error: {e}")
-            errors.append("raw_putcall upsert failed")
-
-    if fg is not None:
-        try:
-            upsert_fear_greed(conn, fg)
-        except Exception as e:
-            log.error(f"raw_fear_greed upsert error: {e}")
-            errors.append("raw_fear_greed upsert failed")
-
-    # ------------------------------------------------------------------
-    # 4. Build master sentiment table
-    # ------------------------------------------------------------------
-    try:
-        build_sentiment_master(conn)
-    except Exception as e:
-        log.error(f"sentiment_daily build error: {e}")
-        errors.append("sentiment_daily build failed")
-
-    conn.close()
+            log.error(f"sentiment_daily build error: {e}")
+            errors.append("sentiment_daily build failed")
 
     # ------------------------------------------------------------------
     # 5. Final status

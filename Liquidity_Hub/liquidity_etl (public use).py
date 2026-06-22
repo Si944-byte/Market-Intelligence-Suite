@@ -31,18 +31,23 @@ import pyodbc
 import logging
 import sys
 import os
+import time
+import contextlib
 from datetime import datetime, date
+from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
 
-SQL_SERVER   = "YOUR_SQL_SERVER"
-SQL_DATABASE = "LiquidityRegime"
-SQL_USER     = "macro_user"
-SQL_PASSWORD = "YOUR_SQL_PASSWORD"
+load_dotenv()
 
-FRED_API_KEY = "YOUR_FRED_API_KEY"
+SQL_SERVER   = os.environ.get("SQL_SERVER",   "YOUR_SQL_SERVER")
+SQL_DATABASE = os.environ.get("SQL_DATABASE", "LiquidityRegime")
+SQL_USER     = os.environ.get("SQL_USER",     "macro_user")
+SQL_PASSWORD = os.environ.get("SQL_PASSWORD", "YOUR_SQL_PASSWORD")
+
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
 FRED_BASE    = "https://api.stlouisfed.org/fred/series/observations"
 
 # Full history load — SQL holds everything, Power BI filters to 2014+
@@ -110,9 +115,38 @@ def get_connection():
     return pyodbc.connect(conn_str)
 
 
+@contextlib.contextmanager
+def managed_conn(server, database, user, password):
+    conn = pyodbc.connect(
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};DATABASE={database};"
+        f"UID={user};PWD={password};TrustServerCertificate=yes"
+    )
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ─────────────────────────────────────────────────────────────
 # FRED EXTRACTION
 # ─────────────────────────────────────────────────────────────
+
+def fetch_with_retry(fn, max_attempts=3, base_wait=5):
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = base_wait * (2 ** attempt)
+            log.warning(f"Attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
 
 def fetch_fred(series_id: str, start: str, end: str) -> pd.DataFrame:
     """Pull a FRED series and return a clean DataFrame with date + value."""
@@ -125,9 +159,11 @@ def fetch_fred(series_id: str, start: str, end: str) -> pd.DataFrame:
         "sort_order":         "asc",
     }
     log.info(f"  Fetching FRED: {series_id}")
-    resp = requests.get(FRED_BASE, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    data = fetch_with_retry(
+        lambda: (lambda r: (r.raise_for_status() or r.json()))(
+            requests.get(FRED_BASE, params=params, timeout=30)
+        )
+    )
 
     if "observations" not in data or not data["observations"]:
         log.warning(f"  No observations returned for {series_id}")
@@ -414,98 +450,98 @@ def main():
     # ── 1. Connect ────────────────────────────────────────────
     log.info("Connecting to SQL Server...")
     try:
-        conn = get_connection()
-        log.info(f"  ✅ Connected to {SQL_SERVER} / {SQL_DATABASE}")
+        conn_ctx = managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD)
     except Exception as e:
         log.error(f"  ❌ Connection failed: {e}")
         sys.exit(1)
 
-    # ── 2. DimDate ────────────────────────────────────────────
-    log.info("")
-    log.info("Building DimDate...")
-    build_dim_date(conn)
+    with conn_ctx as conn:
+        log.info(f"  ✅ Connected to {SQL_SERVER} / {SQL_DATABASE}")
 
-    # ── 3. Fed Balance Sheet (weekly) ─────────────────────────
-    log.info("")
-    log.info("Fetching Fed Balance Sheet components (weekly)...")
-    try:
-        walcl = fetch_fred("WALCL",   FRED_START, FRED_END)
-        tga   = fetch_fred("WTREGEN", FRED_START, FRED_END)
-        rrp   = fetch_fred("WLRRAL",  FRED_START, FRED_END)
+        # ── 2. DimDate ────────────────────────────────────────────
+        log.info("")
+        log.info("Building DimDate...")
+        build_dim_date(conn)
 
-        walcl = apply_unit_conversion(walcl, "millions_to_billions")
-        tga   = apply_unit_conversion(tga,   "millions_to_billions")
-        rrp   = apply_unit_conversion(rrp,   "millions_to_billions")
+        # ── 3. Fed Balance Sheet (weekly) ─────────────────────────
+        log.info("")
+        log.info("Fetching Fed Balance Sheet components (weekly)...")
+        try:
+            walcl = fetch_fred("WALCL",   FRED_START, FRED_END)
+            tga   = fetch_fred("WTREGEN", FRED_START, FRED_END)
+            rrp   = fetch_fred("WLRRAL",  FRED_START, FRED_END)
 
-        n = upsert_fed_balance_sheet(conn, walcl, tga, rrp)
-        log.info(f"  ✅ stg_FedBalanceSheet: {n} rows upserted")
-    except Exception as e:
-        log.error(f"  ❌ Fed Balance Sheet failed: {e}")
+            walcl = apply_unit_conversion(walcl, "millions_to_billions")
+            tga   = apply_unit_conversion(tga,   "millions_to_billions")
+            rrp   = apply_unit_conversion(rrp,   "millions_to_billions")
 
-    # ── 4. Credit Spreads (daily) ─────────────────────────────
-    log.info("")
-    log.info("Fetching Credit Spreads (daily)...")
-    try:
-        hy = fetch_fred("BAMLH0A0HYM2", FRED_START, FRED_END)
-        ig = fetch_fred("BAMLC0A0CM",   FRED_START, FRED_END)
+            n = upsert_fed_balance_sheet(conn, walcl, tga, rrp)
+            log.info(f"  ✅ stg_FedBalanceSheet: {n} rows upserted")
+        except Exception as e:
+            log.error(f"  ❌ Fed Balance Sheet failed: {e}")
 
-        n = upsert_credit_spreads(conn, hy, ig)
-        log.info(f"  ✅ stg_CreditSpreads: {n} rows upserted")
-    except Exception as e:
-        log.error(f"  ❌ Credit Spreads failed: {e}")
+        # ── 4. Credit Spreads (daily) ─────────────────────────────
+        log.info("")
+        log.info("Fetching Credit Spreads (daily)...")
+        try:
+            hy = fetch_fred("BAMLH0A0HYM2", FRED_START, FRED_END)
+            ig = fetch_fred("BAMLC0A0CM",   FRED_START, FRED_END)
 
-    # ── 5. Money Market / Yield Curve (daily) ─────────────────
-    log.info("")
-    log.info("Fetching Money Market data (daily)...")
-    try:
-        sofr   = fetch_fred("SOFR",   FRED_START, FRED_END)
-        dff    = fetch_fred("DFF",    FRED_START, FRED_END)
-        t10yff = fetch_fred("T10YFF", FRED_START, FRED_END)
+            n = upsert_credit_spreads(conn, hy, ig)
+            log.info(f"  ✅ stg_CreditSpreads: {n} rows upserted")
+        except Exception as e:
+            log.error(f"  ❌ Credit Spreads failed: {e}")
 
-        t10yff = apply_unit_conversion(t10yff, "pct_to_bps")
+        # ── 5. Money Market / Yield Curve (daily) ─────────────────
+        log.info("")
+        log.info("Fetching Money Market data (daily)...")
+        try:
+            sofr   = fetch_fred("SOFR",   FRED_START, FRED_END)
+            dff    = fetch_fred("DFF",    FRED_START, FRED_END)
+            t10yff = fetch_fred("T10YFF", FRED_START, FRED_END)
 
-        n = upsert_money_market(conn, sofr, dff, t10yff)
-        log.info(f"  ✅ stg_MoneyMarket: {n} rows upserted")
-    except Exception as e:
-        log.error(f"  ❌ Money Market failed: {e}")
+            t10yff = apply_unit_conversion(t10yff, "pct_to_bps")
 
-# ── 6. SPX Price Data (daily — for forward return analysis) ──────
-    log.info("")
-    log.info("Fetching SPX price data (daily)...")
-    try:
-        spx = fetch_fred("SP500", FRED_START, FRED_END)
-        spx = spx.dropna(subset=["value"])
+            n = upsert_money_market(conn, sofr, dff, t10yff)
+            log.info(f"  ✅ stg_MoneyMarket: {n} rows upserted")
+        except Exception as e:
+            log.error(f"  ❌ Money Market failed: {e}")
 
-        cursor = conn.cursor()
-        upserted = 0
-        for _, row in spx.iterrows():
-            cursor.execute("""
-                MERGE dbo.stg_SPX AS target
-                USING (SELECT ? AS series_date) AS source
-                    ON target.series_date = source.series_date
-                WHEN MATCHED THEN
-                    UPDATE SET spx_close = ?, loaded_at = GETDATE()
-                WHEN NOT MATCHED THEN
-                    INSERT (series_date, spx_close)
-                    VALUES (?, ?);
-            """,
-                str(row["series_date"]),
-                round(float(row["value"]), 2),
-                str(row["series_date"]),
-                round(float(row["value"]), 2),
-            )
-            upserted += 1
-        conn.commit()
-        log.info(f"  ✅ stg_SPX: {upserted} rows upserted")
-    except Exception as e:
-        log.error(f"  ❌ SPX data failed: {e}")
+        # ── 6. SPX Price Data (daily — for forward return analysis) ──────
+        log.info("")
+        log.info("Fetching SPX price data (daily)...")
+        try:
+            spx = fetch_fred("SP500", FRED_START, FRED_END)
+            spx = spx.dropna(subset=["value"])
 
+            cursor = conn.cursor()
+            upserted = 0
+            for _, row in spx.iterrows():
+                cursor.execute("""
+                    MERGE dbo.stg_SPX AS target
+                    USING (SELECT ? AS series_date) AS source
+                        ON target.series_date = source.series_date
+                    WHEN MATCHED THEN
+                        UPDATE SET spx_close = ?, loaded_at = GETDATE()
+                    WHEN NOT MATCHED THEN
+                        INSERT (series_date, spx_close)
+                        VALUES (?, ?);
+                """,
+                    str(row["series_date"]),
+                    round(float(row["value"]), 2),
+                    str(row["series_date"]),
+                    round(float(row["value"]), 2),
+                )
+                upserted += 1
+            conn.commit()
+            log.info(f"  ✅ stg_SPX: {upserted} rows upserted")
+        except Exception as e:
+            log.error(f"  ❌ SPX data failed: {e}")
 
-    # ── 7. Verify ─────────────────────────────────────────────
-    verify(conn)
+        # ── 7. Verify ─────────────────────────────────────────────
+        verify(conn)
 
     # ── 8. Done ───────────────────────────────────────────────
-    conn.close()
     elapsed = (datetime.now() - run_start).seconds
     log.info("")
     log.info("=" * 60)
