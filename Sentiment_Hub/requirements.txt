@@ -1,0 +1,14 @@
+# ============================================================
+# Sentiment Hub — Python Dependencies
+# Market Intelligence Suite
+# Folder: C:\Users\TJs PC\OneDrive\Desktop\Projects\Sentiment Hub
+#
+# Install with:
+# pip install -r requirements.txt --break-system-packages
+# ============================================================
+
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyodbc>=4.0.39
+html5lib>=1.1

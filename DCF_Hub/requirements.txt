@@ -1,0 +1,24 @@
+# S&P 500 DCF Valuation Dashboard
+# Python dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core data processing ──────────────────────────────────────────────────────
+pandas>=2.0.0
+numpy>=1.24.0
+
+# ── Database connections ──────────────────────────────────────────────────────
+# SQLite is built into Python — no install needed
+pyodbc>=4.0.39          # SQL Server connection (DCFRegime)
+
+# ── API and web requests ──────────────────────────────────────────────────────
+requests>=2.31.0        # RapidAPI calls in fetch_fundamentals_rapidapi.py
+                        # Wikipedia scrape in fetch_sp500_list.py
+
+# ── Excel / file handling ─────────────────────────────────────────────────────
+openpyxl>=3.1.0         # Read SP500_102_Stocks_FINAL.xlsx if needed
+
+# ── HTML parsing (Wikipedia scrape) ──────────────────────────────────────────
+lxml>=4.9.0             # pd.read_html() parser used in fetch_sp500_list.py
+
+# ── Optional: yfinance (used in fetch_prices.py — legacy, no longer active) ──
+# yfinance>=0.2.36      # Uncomment only if using the old price fetch script

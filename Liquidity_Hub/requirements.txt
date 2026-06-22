@@ -1,0 +1,58 @@
+# ============================================================
+# requirements.txt
+# Liquidity Dashboard ETL — Python dependencies
+# Project: C:\Users\TJs PC\OneDrive\Desktop\Projects\Liquidity Hub
+# Script:  liquidity_etl.py
+# ============================================================
+#
+# INSTALL:
+#   pip install -r requirements.txt
+#
+# PYTHON VERSION: 3.8+ required
+#
+# ODBC DRIVER (install separately — not pip):
+#   Download: Microsoft ODBC Driver 17 for SQL Server
+#   https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server
+#   Required for pyodbc to connect to SQL Server 2019
+#
+# ============================================================
+
+# ── HTTP requests — FRED API calls ───────────────────────────
+requests>=2.28.0
+
+# ── Data manipulation — ETL transforms, DataFrames ───────────
+pandas>=1.5.0
+
+# ── Numeric operations — Z-score calculations ────────────────
+numpy>=1.23.0
+
+# ── SQL Server connectivity ───────────────────────────────────
+pyodbc>=4.0.35
+
+# ============================================================
+# STDLIB (no install needed — included with Python):
+#   logging   — ETL run logging to liquidity_etl_log.txt
+#   sys       — stdout handler, exit codes
+#   os        — log file path resolution
+#   datetime  — run timestamps, FRED date range
+# ============================================================
+
+# ============================================================
+# SUITE-WIDE DEPENDENCIES (other dashboards in same venv):
+# If running all ETL scripts from a shared virtual environment,
+# these are also required by cot_etl.py and sentiment_etl.py
+# ============================================================
+
+# COT ETL additional dependency
+# requests>=2.28.0  (already covered above)
+
+# Sentiment ETL — no additional dependencies beyond above
+
+# Macro/DCF ETL — RapidAPI calls use requests (covered above)
+
+# ============================================================
+# OPTIONAL — development and debugging only
+# ============================================================
+# ipython           # interactive debugging
+# jupyter           # notebook exploration
+# sqlalchemy        # alternative DB connector (not used in prod)
