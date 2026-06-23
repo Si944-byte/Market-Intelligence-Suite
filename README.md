@@ -9,10 +9,10 @@
 ![Status](https://img.shields.io/badge/Status-Live%20%26%20Automated-brightgreen)
 
 A personal institutional-grade market intelligence system built for
-systematic futures trading. Five interconnected dashboards covering
+systematic futures trading. Six interconnected dashboards covering
 liquidity conditions, macro regime, DCF valuation, market sentiment,
-and COT institutional positioning — all feeding into a unified weekly
-pre-trade decision framework.
+COT institutional positioning, and a multi-instrument backtesting engine
+— all feeding into a unified weekly pre-trade decision framework.
 
 Built entirely from scratch: Python ETL pipelines, SQL Server 2019,
 Power BI Desktop/Service, and Windows Task Scheduler automation.
@@ -128,6 +128,36 @@ See `docs/COT_Dashboard_Guide.docx` for full COT methodology.
 
 ---
 
+### 6. Backtest Hub
+**Database:** BacktestRegime | **Refresh:** Sunday 5:30 AM (ETL) | 7:00 AM (Power BI)
+
+| Property | Detail |
+|---|---|
+| Scripts | `Backtest_Hub/backtest_price_etl (public use).py` (Step 1) |
+| | `Backtest_Hub/backtest_news_etl (public use).py` (Step 2) |
+| | `Backtest_Hub/backtest_signals (public use).py` (Step 3) |
+| | `Backtest_Hub/backtest_regime_tag (public use).py` (Step 4) |
+| | `Backtest_Hub/backtest_simulate (public use).py` (Step 5) |
+| Database | BacktestRegime |
+| Schedule | Sunday 5:30 AM ETL → Sunday 7:00 AM Power BI refresh |
+| Data source | TradingView CSV exports (price) · ForexFactory (news events) |
+| Instruments | 13 micro futures (MES, MNQ, MYM, MGC, SIL, MCL, 6E, ZN, ZB, ZC, ZS, CL, NG) |
+| History | Jan 2021 – present (4H/1H) · limited 5M history |
+
+**What it does:** Pulls 5 years of price history from TradingView exports, generates
+Multi-Level Break of Structure (BoS) signals across 13 instruments and three
+timeframes (4H bias → 1H BoS → 5M entry), tags each signal with the prevailing
+Macro/Liquidity/COT/Sentiment regime, runs a four-tier risk simulation, and
+produces win rate and R-multiple statistics by instrument, direction, and
+Confluence Score.
+
+**Key findings (Cycle 1 — 3,778,718 bars · 4,724 signals · 17,932 trade rows):**
+- Score 3 confluence: 46% win rate, 1.12 avg R (vs. 24–25% at Score 0–1)
+- 6E LONG and ZN LONG excluded from trading plan (2.7% and 12.7% win rates)
+- Primary instruments: ZC LONG, MNQ LONG, MGC SHORT
+
+---
+
 ## How It Works Together
 
 Each dashboard feeds a layer of the pre-trade decision framework:
@@ -180,6 +210,7 @@ producing an Overall Confluence score and Confluence Regime Display.
 | Sentiment | Saturday 5:30 AM | Saturday 6:30 AM |
 | Macro Regime | Sunday 5:00 AM | Sunday 6:00 AM |
 | DCF Valuation | Sunday 5:00 AM | Sunday 6:00 AM |
+| Backtest | Sunday 5:30 AM | Sunday 7:00 AM |
 
 All automation runs via Windows Task Scheduler calling batch files,
 with Power BI Service scheduled refresh via Personal Gateway
@@ -191,6 +222,7 @@ connecting to local SQL Server.
 
 ```
 market-intelligence-suite/
+├── Backtest_Hub/            # Backtest ETL (price, news, signals, regime, simulate)
 ├── COT_Hub/                 # COT positioning ETL
 ├── DCF_Hub/                 # DCF valuation ETL (calculate + fetch_fundamentals)
 ├── Liquidity_Hub/           # Liquidity regime ETL
