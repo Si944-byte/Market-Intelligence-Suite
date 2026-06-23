@@ -51,7 +51,9 @@ CONNECTION_STRING = (
     f"UID=YOUR_SQL_USER;PWD=YOUR_SQL_PASSWORD;"
 )
 
+# Floor for CSV events — update if you obtain a newer ff_calendar.csv covering earlier dates
 BACKTEST_START   = datetime(2024, 1, 1)
+# Fallback gap-fill start used only when the CSV is empty; normally derived from CSV max date
 GAP_START_DATE   = datetime(2025, 4, 1, tzinfo=timezone.utc)
 GAP_END_DATE     = datetime.now(timezone.utc)
 FF_REQUEST_DELAY = 3.0
@@ -167,10 +169,12 @@ def fetch_ff_week(week_start):
         return []
 
 
-def load_gap_events():
-    print(f"  Gap fill: {GAP_START_DATE.date()} -> {GAP_END_DATE.date()}")
+def load_gap_events(start_date=None):
+    if start_date is None:
+        start_date = GAP_START_DATE
+    print(f"  Gap fill: {start_date.date()} -> {GAP_END_DATE.date()}")
     events  = []
-    current = get_monday(GAP_START_DATE)
+    current = get_monday(start_date)
     end     = get_monday(GAP_END_DATE) + timedelta(weeks=1)
     total   = max(int((end - current).days / 7), 1)
     done    = 0
@@ -274,9 +278,14 @@ def main():
         print(f"\n[ERROR] {e}")
         sys.exit(1)
 
-    # Step 2 — Gap fill
-    print("\nStep 2 — FF gap fill (Apr 2025 -> today)...")
-    df_gap = load_gap_events()
+    # Step 2 — Gap fill (start from CSV max date so we never re-fetch known events)
+    if not df_csv.empty:
+        csv_max = df_csv["event_time"].max()
+        gap_start = datetime(csv_max.year, csv_max.month, csv_max.day, tzinfo=timezone.utc)
+    else:
+        gap_start = GAP_START_DATE
+    print(f"\nStep 2 — FF gap fill ({gap_start.date()} -> today)...")
+    df_gap = load_gap_events(start_date=gap_start)
 
     # Step 3 — Combine
     df_all = (

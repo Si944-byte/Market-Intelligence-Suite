@@ -403,7 +403,7 @@ def check_prior_sweep(df_1h, bos_time, bos_level, bos_bullish,
 # ============================================================================
 
 def find_5m_displacement(df_5m, bos_time, bos_level, tick_size,
-                         avg_bodies, news_times):
+                         avg_body_lookup, news_times):
     """
     Scans 5M bars after bos_time looking for a displacement candle
     at/near the bos_level.
@@ -426,22 +426,12 @@ def find_5m_displacement(df_5m, bos_time, bos_level, tick_size,
     closes = df["close"].values
     times  = df["bar_time"].values
 
-    # Get avg_body values aligned to these bars
-    # Match by bar_time from pre-computed array
-    df_full = df_5m.copy().reset_index(drop=True)
-    avg_body_series = pd.Series(avg_bodies, index=df_full["bar_time"])
-
     for i in range(len(df)):
         bar_time_i = pd.Timestamp(times[i])
         body       = abs(closes[i] - opens[i])
 
-        # Get avg body for this bar
-        if bar_time_i in avg_body_series.index:
-            avg_body = avg_body_series[bar_time_i]
-        else:
-            continue
-
-        if np.isnan(avg_body) or avg_body == 0:
+        avg_body = avg_body_lookup.get(bar_time_i)
+        if avg_body is None or np.isnan(avg_body) or avg_body == 0:
             continue
 
         ratio = body / avg_body
@@ -557,18 +547,15 @@ def detect_signals(instrument, df_5m, df_1h, df_4h, pdhl_df,
     tick_size = TICK_SIZES.get(instrument, 0.25)
     contracts = CONTRACT_SIZES.get(instrument, 1)
 
-    # Pre-calculate 5M avg bodies
-    opens_5m     = df_5m["open"].values
-    closes_5m    = df_5m["close"].values
-    avg_bodies   = calc_avg_body(opens_5m, closes_5m, AVG_BODY_LOOKBACK)
-
-    # Pre-calculate 1H swing levels for prior sweep check
-    pdhl_lookup = pdhl_df.set_index("bar_time")
+    # Pre-calculate 5M avg bodies — built once as a dict for O(1) lookup
+    opens_5m        = df_5m["open"].values
+    closes_5m       = df_5m["close"].values
+    avg_bodies_arr  = calc_avg_body(opens_5m, closes_5m, AVG_BODY_LOOKBACK)
+    avg_body_lookup = dict(zip(df_5m["bar_time"], avg_bodies_arr))
 
     cursor          = conn.cursor()
     signals_written = 0
-    processed_bos = set()  # Track BoS times we've already found a signal for
-    last_bos_time = None   # Track last BoS time for 10-bar lockout
+    processed_bos   = set()
 
     # Determine scan start — need enough 4H bars for direction
     scan_start = df_4h["bar_time"].iloc[5] if len(df_4h) > 5 else df_4h["bar_time"].iloc[0]
@@ -596,7 +583,7 @@ def detect_signals(instrument, df_5m, df_1h, df_4h, pdhl_df,
         if bos is None:
             continue
 
-    # Skip if we already processed this BoS
+        # Skip if we already processed this BoS
         bos_key = (instrument, str(bos["bos_time"]))
         if bos_key in processed_bos:
             continue
@@ -637,7 +624,7 @@ def detect_signals(instrument, df_5m, df_1h, df_4h, pdhl_df,
         # ── STEP 3: Find 5M displacement at BoS level ────────────────────
         displ = find_5m_displacement(
             df_5m, bos["bos_time"], bos["bos_level"],
-            tick_size, avg_bodies, news_times
+            tick_size, avg_body_lookup, news_times
         )
         if displ is None:
             continue

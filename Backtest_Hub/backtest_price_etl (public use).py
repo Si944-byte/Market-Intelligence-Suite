@@ -230,8 +230,10 @@ def insert_to_sql(df, conn):
                     instrument, timeframe, bar_time,   # INSERT params
                     o, h, l, c, v
                 ))
-                inserted += 1 if cursor.rowcount > 0 else 0
-                skipped  += 1 if cursor.rowcount == 0 else 0
+                if cursor.rowcount == 1:
+                    inserted += 1
+                else:
+                    skipped += 1
             except pyodbc.Error as e:
                 print(f"\n  [ERROR] Row insert failed: {e}")
                 skipped += 1

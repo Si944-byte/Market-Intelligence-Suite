@@ -51,7 +51,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import pyodbc
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # ============================================================================
 # CONFIGURATION — update these values for your environment
@@ -72,7 +73,7 @@ MAX_TRADE_BARS = 300
 MAX_STOP_TICKS = 150
 NO_ENTRY_BARS  = 30
 TRAIL_CANDLES  = 2
-ET_UTC_OFFSET  = -4   # EDT (UTC-4)
+_ET = ZoneInfo("America/New_York")
 
 # ── Tick sizes (points per tick) ─────────────────────────────────────────────
 TICK_SIZES = {
@@ -149,33 +150,31 @@ RISK_TIERS = {
 # ============================================================================
 
 def utc_to_et(dt):
-    return dt + timedelta(hours=ET_UTC_OFFSET)
+    return dt.replace(tzinfo=timezone.utc).astimezone(_ET)
 
 
 def is_in_session(bar_time_utc):
     et      = utc_to_et(bar_time_utc)
     weekday = et.weekday()
     hour    = et.hour
-    if weekday == 5:
+    if weekday == 5:                  # Saturday — never in session
         return False
-    if weekday == 6:
+    if weekday == 4 and hour >= 17:   # Friday — CME closes at 17:00 ET
+        return False
+    if weekday == 6:                  # Sunday — opens at 18:00 ET
         return hour >= 18
     if hour < 16:
         return True
-    if 16 <= hour < 18:
+    if 16 <= hour < 18:               # daily maintenance gap
         return False
     return True
 
 
 def is_near_session_close(bar_time_utc):
-    et     = utc_to_et(bar_time_utc)
-    hour   = et.hour
-    minute = et.minute
-    if hour == 15 and minute >= (60 - NO_ENTRY_BARS * 5):
-        return True
-    if hour == 16 and minute == 0:
-        return True
-    return False
+    et = utc_to_et(bar_time_utc)
+    total_minutes = et.hour * 60 + et.minute
+    close_minutes = 16 * 60
+    return (close_minutes - NO_ENTRY_BARS * 5) <= total_minutes < close_minutes
 
 
 def is_force_exit_bar(bar_time_utc):
