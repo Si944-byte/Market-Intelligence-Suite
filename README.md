@@ -5,7 +5,7 @@
 ![Power BI](https://img.shields.io/badge/Power%20BI-Desktop%2FService-yellow?logo=powerbi)
 ![FRED](https://img.shields.io/badge/Data-FRED%20API-green)
 ![CFTC](https://img.shields.io/badge/Data-CFTC.gov-blue)
-![Tests](https://img.shields.io/badge/Tests-170%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-177%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/Status-Live%20%26%20Automated-brightgreen)
 
 A personal institutional-grade market intelligence system built for
@@ -105,7 +105,7 @@ Covers all 503 S&P 500 stocks via RapidAPI Yahoo Finance.
 
 Tracks market crowd psychology across multiple sentiment indicators.
 
-- **Data sources:** CBOE (put/call ratio), CNN Fear & Greed, AAII sentiment survey
+- **Data sources:** CBOE (put/call ratio), CNN Fear & Greed
 - **Key metrics:** Composite sentiment score, regime classification, historical percentile context
 - **Output:** Sentiment regime label, composite score trending, Power BI dashboard with historical context
 
@@ -275,7 +275,7 @@ All 170 tests should pass before running any ETL against a live database.
 
 ## ETL Reliability Features
 
-All six ETL scripts share a common set of production hardening patterns applied during the Week 1 & 2 stabilization pass:
+All six ETL scripts share a common set of production hardening patterns applied during the stabilization pass:
 
 | Feature | Detail |
 |---------|--------|
