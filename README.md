@@ -131,6 +131,8 @@ See `docs/COT_Dashboard_Guide.docx` for full COT methodology.
 ### 6. Backtest Hub
 **Database:** BacktestRegime | **Refresh:** Sunday 5:30 AM (ETL) | 7:00 AM (Power BI)
 
+<img width="1279" height="722" alt="Screenshot 2026-06-23 210359" src="https://github.com/user-attachments/assets/4b709770-456e-4fc1-8a08-3fec75f4c036" />
+
 | Property | Detail |
 |---|---|
 | Scripts | `Backtest_Hub/backtest_databento_etl (public use).py` (Step 1 — Databento price pull) |
