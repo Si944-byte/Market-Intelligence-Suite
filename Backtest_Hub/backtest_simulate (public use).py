@@ -743,7 +743,7 @@ def main():
         instrument = signal["instrument"]
 
         if instrument != current_instrument:
-            print(f"\n{'─'*55}")
+            print(f"\n{'-'*55}")
             print(f"Simulating: {instrument}")
             df_5m = load_prices_for_instrument(conn, instrument)
             print(f"  5M bars: {len(df_5m):,}")
@@ -777,7 +777,7 @@ def main():
                       f"{signal['signal_id']} tier {tier_num}: {e}")
 
     # Build equity curves
-    print(f"\n{'─'*55}")
+    print(f"\n{'-'*55}")
     print("Building equity curves (all tiers)...")
     build_equity_curve(conn)
 

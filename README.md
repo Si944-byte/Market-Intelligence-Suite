@@ -133,18 +133,19 @@ See `docs/COT_Dashboard_Guide.docx` for full COT methodology.
 
 | Property | Detail |
 |---|---|
-| Scripts | `Backtest_Hub/backtest_price_etl (public use).py` (Step 1) |
+| Scripts | `Backtest_Hub/backtest_databento_etl (public use).py` (Step 1 — Databento price pull) |
 | | `Backtest_Hub/backtest_news_etl (public use).py` (Step 2) |
 | | `Backtest_Hub/backtest_signals (public use).py` (Step 3) |
 | | `Backtest_Hub/backtest_regime_tag (public use).py` (Step 4) |
 | | `Backtest_Hub/backtest_simulate (public use).py` (Step 5) |
+| | `Backtest_Hub/backtest_price_etl (public use).py` (utility — initial CSV import only) |
 | Database | BacktestRegime |
 | Schedule | Sunday 5:30 AM ETL → Sunday 7:00 AM Power BI refresh |
-| Data source | TradingView CSV exports (price) · ForexFactory (news events) |
+| Data source | Databento GLBX.MDP3 API (price) · ForexFactory (news events) |
 | Instruments | 13 micro futures (MES, MNQ, MYM, MGC, SIL, MCL, 6E, ZN, ZB, ZC, ZS, CL, NG) |
 | History | Jan 2021 – present (4H/1H) · limited 5M history |
 
-**What it does:** Pulls 5 years of price history from TradingView exports, generates
+**What it does:** Pulls 5 years of price history from Databento (GLBX.MDP3, 1M OHLCV resampled to 5M/1H/4H), generates
 Multi-Level Break of Structure (BoS) signals across 13 instruments and three
 timeframes (4H bias → 1H BoS → 5M entry), tags each signal with the prevailing
 Macro/Liquidity/COT/Sentiment regime, runs a four-tier risk simulation, and
@@ -196,7 +197,7 @@ producing an Overall Confluence score and Confluence Regime Display.
 | Database | SQL Server 2019 (local instance) |
 | Visualization | Power BI Desktop + Power BI Service |
 | Automation | Windows Task Scheduler + Personal Gateway |
-| Data Sources | FRED API, RapidAPI (Yahoo Finance), CFTC.gov, CBOE |
+| Data Sources | FRED API, RapidAPI (Yahoo Finance), CFTC.gov, CBOE, Databento GLBX.MDP3 |
 | Testing | pytest (170 tests) |
 
 ---
@@ -259,6 +260,8 @@ RAPIDAPI_KEY=YOUR_RAPIDAPI_KEY
 DCF_DB_PATH=C:\path\to\sp500_prices.db
 DCF_TICKERS_PATH=C:\path\to\sp500_tickers.csv
 DCF_OUTPUT_PATH=C:\path\to\Stock_Data_Current.csv
+DATABENTO_API_KEY=YOUR_DATABENTO_API_KEY
+DATABENTO_BACKUP_FOLDER=C:\path\to\Data\Databento
 ```
 
 All six ETL scripts load credentials automatically via `python-dotenv` — no hardcoded values.

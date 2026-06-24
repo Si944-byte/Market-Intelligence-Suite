@@ -1,12 +1,12 @@
 @echo off
 echo ============================================================
-echo  BacktestRegime ETL — Market Intelligence Suite
+echo  BacktestRegime ETL - Market Intelligence Suite
 echo ============================================================
 
-echo [1/5] Price ETL...
-python "backtest_price_etl (public use).py"
+echo [1/5] Databento Price ETL...
+python "backtest_databento_etl (public use).py"
 if %errorlevel% neq 0 (
-    echo ERROR: Price ETL failed. Aborting.
+    echo ERROR: Databento ETL failed. Aborting.
     exit /b 1
 )
 
