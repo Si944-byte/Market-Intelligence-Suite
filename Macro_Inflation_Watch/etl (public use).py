@@ -10,6 +10,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from etl_utils import fetch_with_retry
 from config import MACRO
+from etl_email import send_etl_notification
 
 # =============================================================
 # CONFIG
@@ -302,53 +303,98 @@ def build_master(engine):
 # =============================================================
 
 def run():
+    start_time = time.time()
+
     print("=" * 55)
     print("Macro Regime ETL — SQL Server 2019")
     print("=" * 55)
 
-    print("\nInitializing database...")
-    create_database()
-    engine = get_engine()
-    run_schema(engine)
+    try:
+        print("\nInitializing database...")
+        create_database()
+        engine = get_engine()
+        run_schema(engine)
 
-    fred = Fred(api_key=FRED_API_KEY)
-    print("\nExtracting FRED series...")
+        fred = Fred(api_key=FRED_API_KEY)
+        print("\nExtracting FRED series...")
 
-    cpi_frames = {}
-    ffr_df = unemp_df = gdp_df = yc_df = pmi_df = None
+        cpi_frames = {}
+        ffr_df = unemp_df = gdp_df = yc_df = pmi_df = None
 
-    for series_id, (table, name) in FRED_SERIES.items():
-        df = extract_fred(fred, series_id)
-        if table == "raw_cpi":
-            cpi_frames[series_id] = df
-        elif table == "raw_ffr":
-            ffr_df = df
-        elif table == "raw_unemployment":
-            unemp_df = df
-        elif table == "raw_gdp":
-            gdp_df = df
-        elif table == "raw_yield_curve":
-            yc_df = df
-        elif table == "raw_pmi":
-            pmi_df = df
+        for series_id, (table, name) in FRED_SERIES.items():
+            df = extract_fred(fred, series_id)
+            if table == "raw_cpi":
+                cpi_frames[series_id] = df
+            elif table == "raw_ffr":
+                ffr_df = df
+            elif table == "raw_unemployment":
+                unemp_df = df
+            elif table == "raw_gdp":
+                gdp_df = df
+            elif table == "raw_yield_curve":
+                yc_df = df
+            elif table == "raw_pmi":
+                pmi_df = df
 
-    time.sleep(5)
-    spx_df = extract_spx()
+        time.sleep(5)
+        spx_df = extract_spx()
 
-    print("\nLoading raw tables...")
-    load_raw_cpi(engine, cpi_frames)
-    load_raw_single(engine, "raw_ffr", ffr_df)
-    load_raw_single(engine, "raw_unemployment", unemp_df)
-    load_raw_single(engine, "raw_gdp", gdp_df)
-    load_raw_single(engine, "raw_yield_curve", yc_df)
-    load_raw_single(engine, "raw_pmi", pmi_df)
-    load_raw_spx(engine, spx_df)
+        print("\nLoading raw tables...")
+        load_raw_cpi(engine, cpi_frames)
+        load_raw_single(engine, "raw_ffr", ffr_df)
+        load_raw_single(engine, "raw_unemployment", unemp_df)
+        load_raw_single(engine, "raw_gdp", gdp_df)
+        load_raw_single(engine, "raw_yield_curve", yc_df)
+        load_raw_single(engine, "raw_pmi", pmi_df)
+        load_raw_spx(engine, spx_df)
 
-    build_master(engine)
+        build_master(engine)
 
-    print("\nDone.")
-    print(f"Connect Power BI to: Server={SQL_SERVER}, Database={SQL_DATABASE}")
-    print("=" * 55)
+        # Stats for notification
+        total_rows    = 0
+        latest_regime = "Unknown"
+        latest_date   = "Unknown"
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT COUNT(*) FROM dbo.macro_monthly"
+                )).fetchone()
+                total_rows = result[0] if result else 0
+
+                result = conn.execute(text(
+                    "SELECT TOP 1 regime_label, date FROM dbo.macro_monthly ORDER BY date DESC"
+                )).fetchone()
+                if result:
+                    latest_regime = result[0]
+                    latest_date   = str(result[1])
+        except Exception:
+            pass
+
+        print("\nDone.")
+        print(f"Connect Power BI to: Server={SQL_SERVER}, Database={SQL_DATABASE}")
+        print("=" * 55)
+
+        send_etl_notification(
+            hub="Macro Regime",
+            status="SUCCESS",
+            rows_written=total_rows,
+            latest_data_date=latest_date,
+            duration_seconds=time.time() - start_time,
+            extra_lines=[
+                f"Macro rows: {total_rows}",
+                f"Current regime: {latest_regime}",
+                f"Latest date: {latest_date}",
+            ],
+        )
+
+    except Exception as e:
+        send_etl_notification(
+            hub="Macro Regime",
+            status="FAILED",
+            duration_seconds=time.time() - start_time,
+            errors=[str(e)],
+        )
+        raise
 
 
 if __name__ == "__main__":

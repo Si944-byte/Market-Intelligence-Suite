@@ -35,6 +35,7 @@ import time
 from datetime import datetime, date
 from dotenv import load_dotenv
 from etl_utils import managed_conn, fetch_with_retry, configure_logging
+from etl_email import send_etl_notification
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
@@ -387,72 +388,80 @@ def verify(conn):
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    run_start = datetime.now()
+    start_time = time.time()
+    run_start  = datetime.now()
+    fed_rows = credit_rows = mm_rows = 0
+    etl_errors = []
+
     log.info("=" * 60)
     log.info("LIQUIDITY ETL — START")
     log.info(f"Run time:  {run_start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info(f"FRED range: {FRED_START} → {FRED_END}")
     log.info("=" * 60)
 
-    # ── 1. Connect ────────────────────────────────────────────
-    log.info("Connecting to SQL Server...")
     try:
-        conn_ctx = managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD)
-    except Exception as e:
-        log.error(f"  ❌ Connection failed: {e}")
-        sys.exit(1)
-
-    with conn_ctx as conn:
-        log.info(f"  ✅ Connected to {SQL_SERVER} / {SQL_DATABASE}")
-
-        # ── 2. DimDate ────────────────────────────────────────────
-        log.info("")
-        log.info("Building DimDate...")
-        build_dim_date(conn)
-
-        # ── 3. Fed Balance Sheet (weekly) ─────────────────────────
-        log.info("")
-        log.info("Fetching Fed Balance Sheet components (weekly)...")
+        # ── 1. Connect ────────────────────────────────────────────
+        log.info("Connecting to SQL Server...")
         try:
-            walcl = fetch_fred("WALCL",   FRED_START, FRED_END)
-            tga   = fetch_fred("WTREGEN", FRED_START, FRED_END)
-            rrp   = fetch_fred("WLRRAL",  FRED_START, FRED_END)
-
-            walcl = apply_unit_conversion(walcl, "millions_to_billions")
-            tga   = apply_unit_conversion(tga,   "millions_to_billions")
-            rrp   = apply_unit_conversion(rrp,   "millions_to_billions")
-
-            n = upsert_fed_balance_sheet(conn, walcl, tga, rrp)
-            log.info(f"  ✅ stg_FedBalanceSheet: {n} rows upserted")
+            conn_ctx = managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD)
         except Exception as e:
-            log.error(f"  ❌ Fed Balance Sheet failed: {e}")
+            log.error(f"  ❌ Connection failed: {e}")
+            raise
 
-        # ── 4. Credit Spreads (daily) ─────────────────────────────
-        log.info("")
-        log.info("Fetching Credit Spreads (daily)...")
-        try:
-            hy = fetch_fred("BAMLH0A0HYM2", FRED_START, FRED_END)
-            ig = fetch_fred("BAMLC0A0CM",   FRED_START, FRED_END)
+        with conn_ctx as conn:
+            log.info(f"  ✅ Connected to {SQL_SERVER} / {SQL_DATABASE}")
 
-            n = upsert_credit_spreads(conn, hy, ig)
-            log.info(f"  ✅ stg_CreditSpreads: {n} rows upserted")
-        except Exception as e:
-            log.error(f"  ❌ Credit Spreads failed: {e}")
+            # ── 2. DimDate ────────────────────────────────────────────
+            log.info("")
+            log.info("Building DimDate...")
+            build_dim_date(conn)
 
-        # ── 5. Money Market / Yield Curve (daily) ─────────────────
-        log.info("")
-        log.info("Fetching Money Market data (daily)...")
-        try:
-            sofr   = fetch_fred("SOFR",   FRED_START, FRED_END)
-            dff    = fetch_fred("DFF",    FRED_START, FRED_END)
-            t10yff = fetch_fred("T10YFF", FRED_START, FRED_END)
+            # ── 3. Fed Balance Sheet (weekly) ─────────────────────────
+            log.info("")
+            log.info("Fetching Fed Balance Sheet components (weekly)...")
+            try:
+                walcl = fetch_fred("WALCL",   FRED_START, FRED_END)
+                tga   = fetch_fred("WTREGEN", FRED_START, FRED_END)
+                rrp   = fetch_fred("WLRRAL",  FRED_START, FRED_END)
 
-            t10yff = apply_unit_conversion(t10yff, "pct_to_bps")
+                walcl = apply_unit_conversion(walcl, "millions_to_billions")
+                tga   = apply_unit_conversion(tga,   "millions_to_billions")
+                rrp   = apply_unit_conversion(rrp,   "millions_to_billions")
 
-            n = upsert_money_market(conn, sofr, dff, t10yff)
-            log.info(f"  ✅ stg_MoneyMarket: {n} rows upserted")
-        except Exception as e:
-            log.error(f"  ❌ Money Market failed: {e}")
+                fed_rows = upsert_fed_balance_sheet(conn, walcl, tga, rrp)
+                log.info(f"  ✅ stg_FedBalanceSheet: {fed_rows} rows upserted")
+            except Exception as e:
+                log.error(f"  ❌ Fed Balance Sheet failed: {e}")
+                etl_errors.append(f"Fed Balance Sheet: {e}")
+
+            # ── 4. Credit Spreads (daily) ─────────────────────────────
+            log.info("")
+            log.info("Fetching Credit Spreads (daily)...")
+            try:
+                hy = fetch_fred("BAMLH0A0HYM2", FRED_START, FRED_END)
+                ig = fetch_fred("BAMLC0A0CM",   FRED_START, FRED_END)
+
+                credit_rows = upsert_credit_spreads(conn, hy, ig)
+                log.info(f"  ✅ stg_CreditSpreads: {credit_rows} rows upserted")
+            except Exception as e:
+                log.error(f"  ❌ Credit Spreads failed: {e}")
+                etl_errors.append(f"Credit Spreads: {e}")
+
+            # ── 5. Money Market / Yield Curve (daily) ─────────────────
+            log.info("")
+            log.info("Fetching Money Market data (daily)...")
+            try:
+                sofr   = fetch_fred("SOFR",   FRED_START, FRED_END)
+                dff    = fetch_fred("DFF",    FRED_START, FRED_END)
+                t10yff = fetch_fred("T10YFF", FRED_START, FRED_END)
+
+                t10yff = apply_unit_conversion(t10yff, "pct_to_bps")
+
+                mm_rows = upsert_money_market(conn, sofr, dff, t10yff)
+                log.info(f"  ✅ stg_MoneyMarket: {mm_rows} rows upserted")
+            except Exception as e:
+                log.error(f"  ❌ Money Market failed: {e}")
+                etl_errors.append(f"Money Market: {e}")
 
         # ── 6. SPX Price Data (daily — for forward return analysis) ──────
         log.info("")
@@ -484,16 +493,45 @@ def main():
             log.info(f"  ✅ stg_SPX: {upserted} rows upserted")
         except Exception as e:
             log.error(f"  ❌ SPX data failed: {e}")
+            etl_errors.append(f"SPX data: {e}")
 
         # ── 7. Verify ─────────────────────────────────────────────
         verify(conn)
 
-    # ── 8. Done ───────────────────────────────────────────────
-    elapsed = (datetime.now() - run_start).seconds
-    log.info("")
-    log.info("=" * 60)
-    log.info(f"LIQUIDITY ETL — COMPLETE ({elapsed}s)")
-    log.info("=" * 60)
+        # Latest date for notification
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(series_date) FROM dbo.stg_FedBalanceSheet")
+        latest_date = cursor.fetchone()[0]
+
+        # ── 8. Done ───────────────────────────────────────────────
+        elapsed = (datetime.now() - run_start).seconds
+        log.info("")
+        log.info("=" * 60)
+        log.info(f"LIQUIDITY ETL — COMPLETE ({elapsed}s)")
+        log.info("=" * 60)
+
+        send_etl_notification(
+            hub="Liquidity",
+            status="FAILED" if etl_errors else "SUCCESS",
+            rows_written=fed_rows + credit_rows + mm_rows,
+            latest_data_date=str(latest_date) if latest_date else None,
+            duration_seconds=time.time() - start_time,
+            errors=etl_errors,
+            extra_lines=[
+                f"Fed balance sheet rows: {fed_rows}",
+                f"Credit spread rows: {credit_rows}",
+                f"Money market rows: {mm_rows}",
+            ],
+        )
+
+    except Exception as e:
+        send_etl_notification(
+            hub="Liquidity",
+            status="FAILED",
+            duration_seconds=time.time() - start_time,
+            errors=[str(e)],
+        )
+        raise
 
 
 if __name__ == "__main__":

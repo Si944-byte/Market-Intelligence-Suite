@@ -28,6 +28,8 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 from etl_utils import managed_conn
+import time
+from etl_email import send_etl_notification
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -426,41 +428,85 @@ def print_summary(df):
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
+    start_time = time.time()
+
     print("=" * 60)
     print("  S&P 500 DCF Calculator & SQL Server Writer")
     print("=" * 60)
 
-    if not os.path.exists(DB_PATH):
-        print(f"\n  ERROR: Database not found.")
-        print(f"  Run fetch_fundamentals.py first.")
-        return
-
-    df_raw, latest_date = load_latest_fundamentals()
-    df_out = run_calculations(df_raw)
-
-    # Sort by Valuation Gap descending (best opportunities first)
-    df_out = df_out.sort_values('Valuation_Gap_Pct', ascending=False, na_position='last')
-
-    # ── Write to SQL Server ───────────────────────────────────────────────────
     try:
-        inserted, skipped = write_to_sql(df_out)
+        if not os.path.exists(DB_PATH):
+            print(f"\n  ERROR: Database not found.")
+            print(f"  Run fetch_fundamentals.py first.")
+            send_etl_notification(
+                hub="DCF Valuation",
+                status="FAILED",
+                duration_seconds=time.time() - start_time,
+                errors=["SQLite database not found — run fetch_fundamentals.py first"],
+            )
+            return
+
+        df_raw, latest_date = load_latest_fundamentals()
+        df_out = run_calculations(df_raw)
+
+        # Sort by Valuation Gap descending (best opportunities first)
+        df_out = df_out.sort_values('Valuation_Gap_Pct', ascending=False, na_position='last')
+
+        # ── Write to SQL Server ───────────────────────────────────────────────
+        sql_error = None
+        try:
+            inserted, skipped = write_to_sql(df_out)
+        except Exception as e:
+            print(f"\n  SQL Server write failed: {e}")
+            print(f"  Falling back to CSV export only.")
+            sql_error = str(e)
+
+        # ── CSV backup export (unchanged) ─────────────────────────────────────
+        df_out.to_csv(OUTPUT_PATH, index=False)
+
+        print_summary(df_out)
+
+        print(f"\n{'='*60}")
+        print(f"  COMPLETE")
+        print(f"  Data as of:    {latest_date}")
+        print(f"  Stocks:        {len(df_out)}")
+        print(f"  SQL Server:    DCFRegime.dbo.dcf_results")
+        print(f"  CSV backup:    {OUTPUT_PATH}")
+        print(f"{'='*60}")
+        print(f"\n  Open Power BI and hit Refresh.")
+
+        tickers_processed = len(df_out)
+        buy_count         = int((df_out['Signal'] == 'BUY').sum())
+        hold_count        = int((df_out['Signal'] == 'HOLD').sum())
+        sell_count        = int((df_out['Signal'] == 'SELL').sum())
+        robust_buy_count  = int(
+            ((df_out['Valuation_Gap_Pct'] > 0.10) & (df_out['Conservative_Gap'] > 0.10)).sum()
+        )
+
+        send_etl_notification(
+            hub="DCF Valuation",
+            status="FAILED" if sql_error else "SUCCESS",
+            rows_written=tickers_processed,
+            latest_data_date=str(latest_date),
+            duration_seconds=time.time() - start_time,
+            errors=[f"SQL write failed: {sql_error}"] if sql_error else [],
+            extra_lines=[
+                f"Tickers processed: {tickers_processed}",
+                f"BUY signals: {buy_count}",
+                f"HOLD signals: {hold_count}",
+                f"SELL signals: {sell_count}",
+                f"Robust BUY (conservative pass): {robust_buy_count}",
+            ],
+        )
+
     except Exception as e:
-        print(f"\n  SQL Server write failed: {e}")
-        print(f"  Falling back to CSV export only.")
-
-    # ── CSV backup export (unchanged) ────────────────────────────────────────
-    df_out.to_csv(OUTPUT_PATH, index=False)
-
-    print_summary(df_out)
-
-    print(f"\n{'='*60}")
-    print(f"  COMPLETE")
-    print(f"  Data as of:    {latest_date}")
-    print(f"  Stocks:        {len(df_out)}")
-    print(f"  SQL Server:    DCFRegime.dbo.dcf_results")
-    print(f"  CSV backup:    {OUTPUT_PATH}")
-    print(f"{'='*60}")
-    print(f"\n  Open Power BI and hit Refresh.")
+        send_etl_notification(
+            hub="DCF Valuation",
+            status="FAILED",
+            duration_seconds=time.time() - start_time,
+            errors=[str(e)],
+        )
+        raise
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ import os
 import time
 from dotenv import load_dotenv
 from etl_utils import managed_conn, fetch_with_retry, configure_logging
+from etl_email import send_etl_notification
 
 # =============================================================================
 # CONFIG
@@ -578,6 +579,8 @@ def build_sentiment_master(conn):
 # =============================================================================
 
 def main():
+    start_time = time.time()
+
     log.info("=" * 60)
     log.info("Sentiment ETL — START")
     log.info(f"Run date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -657,6 +660,24 @@ def main():
             log.error(f"sentiment_daily build error: {e}")
             errors.append("sentiment_daily build failed")
 
+        # Stats for notification (query while connection is open)
+        total_rows   = 0
+        latest_z     = None
+        latest_label = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM dbo.sentiment_daily")
+            total_rows = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT TOP 1 composite_zscore, sentiment_label "
+                "FROM dbo.sentiment_daily ORDER BY date DESC"
+            )
+            row = cursor.fetchone()
+            if row:
+                latest_z, latest_label = row[0], row[1]
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # 5. Final status
     # ------------------------------------------------------------------
@@ -666,6 +687,19 @@ def main():
     else:
         log.info("Sentiment ETL — COMPLETE (no errors)")
     log.info("=" * 60)
+
+    send_etl_notification(
+        hub="Market Sentiment",
+        status="FAILED" if errors else "SUCCESS",
+        rows_written=total_rows,
+        duration_seconds=time.time() - start_time,
+        errors=errors,
+        extra_lines=[
+            f"Sentiment rows: {total_rows}",
+            f"Latest composite Z: {latest_z:.2f}" if latest_z is not None else "Latest composite Z: N/A",
+            f"Sentiment label: {latest_label}" if latest_label else "Sentiment label: N/A",
+        ],
+    )
 
 
 if __name__ == "__main__":

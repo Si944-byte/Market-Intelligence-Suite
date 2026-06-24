@@ -233,6 +233,7 @@ market-intelligence-suite/
 ├── Sentiment_Hub/           # Sentiment ETL
 ├── tests/                   # pytest suite — 170 tests across all 6 ETL modules
 ├── docs/                    # Architecture, data flow, and roadmap docs
+├── etl_email (public use).py  # Shared ETL completion notification utility (Gmail SMTP)
 ├── requirements.txt         # Pinned production dependencies
 ├── requirements-test.txt    # pytest + test dependencies
 ├── FIX_GUIDE.md             # Week 1 & 2 stabilization fix log
@@ -264,6 +265,9 @@ DCF_TICKERS_PATH=C:\path\to\sp500_tickers.csv
 DCF_OUTPUT_PATH=C:\path\to\Stock_Data_Current.csv
 DATABENTO_API_KEY=YOUR_DATABENTO_API_KEY
 DATABENTO_BACKUP_FOLDER=C:\path\to\Data\Databento
+GMAIL_APP_PASSWORD=your_16char_app_password
+ETL_EMAIL_FROM=your_gmail@gmail.com
+ETL_EMAIL_TO=destination@email.com
 ```
 
 All six ETL scripts load credentials automatically via `python-dotenv` — no hardcoded values.
@@ -290,6 +294,7 @@ All six ETL scripts share a common set of production hardening patterns applied 
 | Exponential backoff retry | External API calls retry up to 3 times: 5s → 10s → 20s waits |
 | Connection context manager | `managed_conn()` auto-commits on success, rolls back on exception, always closes |
 | Leading-zero CFTC codes | `pd.read_csv(..., dtype=str)` preserves codes like `043602` (ZN) that integer parsing would drop |
+| ETL completion emails | Each pipeline sends a plain-text summary email on completion (success or failure) via Gmail SMTP; shared `etl_email.py` utility reuses the same SMTP config as the weekly brief |
 
 ---
 

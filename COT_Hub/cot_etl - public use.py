@@ -22,6 +22,7 @@ import logging
 from datetime import datetime, date
 from dotenv import load_dotenv
 from etl_utils import managed_conn, fetch_with_retry, safe_int, safe_float, configure_logging
+from etl_email import send_etl_notification
 
 warnings.filterwarnings("ignore")
 
@@ -1162,6 +1163,9 @@ def validate_cot_weekly(conn):
 
 def main():
     import argparse
+    start_time   = time.time()
+    etl_warnings = []
+
     parser = argparse.ArgumentParser(description="COT ETL Pipeline")
     parser.add_argument(
         "--rebuild-master-only",
@@ -1176,41 +1180,80 @@ def main():
         log.info("Mode: REBUILD MASTER ONLY (skipping download)")
     log.info("=" * 60)
 
-    # 1. Connect + run pipeline
-    log.info("Connecting to SQL Server...")
-    with managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD) as conn:
-        log.info(f"Connected: {SQL_SERVER} / {SQL_DATABASE}")
+    try:
+        total_rows         = 0
+        latest_report_date = None
 
-        # 2. Schema
-        create_tables(conn)
+        # 1. Connect + run pipeline
+        log.info("Connecting to SQL Server...")
+        with managed_conn(SQL_SERVER, SQL_DATABASE, SQL_USER, SQL_PASSWORD) as conn:
+            log.info(f"Connected: {SQL_SERVER} / {SQL_DATABASE}")
 
-        if not args.rebuild_master_only:
-            # 3. Download + parse all years
-            raw_df = fetch_all_years()
-            if raw_df.empty:
-                log.error("No data retrieved — ETL aborted")
-                return
+            # 2. Schema
+            create_tables(conn)
 
-            # 4. Upsert raw staging
-            upsert_raw_cot(conn, raw_df)
-        else:
-            log.info("Skipping download — using existing raw_cot data")
+            if not args.rebuild_master_only:
+                # 3. Download + parse all years
+                raw_df = fetch_all_years()
+                if raw_df.empty:
+                    log.error("No data retrieved — ETL aborted")
+                    send_etl_notification(
+                        hub="COT Positioning",
+                        status="FAILED",
+                        duration_seconds=time.time() - start_time,
+                        errors=["No data retrieved from CFTC"],
+                    )
+                    return
 
-        # 5. Build master fact table
-        build_cot_master(conn)
+                # 4. Upsert raw staging
+                upsert_raw_cot(conn, raw_df)
+            else:
+                log.info("Skipping download — using existing raw_cot data")
 
-        # 6. Create / refresh SQL views
-        create_views(conn)
+            # 5. Build master fact table
+            build_cot_master(conn)
 
-        # 7. Add primary_zscore computed column if not exists
-        add_primary_zscore_column(conn)
+            # 6. Create / refresh SQL views
+            create_views(conn)
 
-        # 8. Validate data quality
-        validate_cot_weekly(conn)
+            # 7. Add primary_zscore computed column if not exists
+            add_primary_zscore_column(conn)
 
-    log.info("=" * 60)
-    log.info(f"COT ETL COMPLETE  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log.info("=" * 60)
+            # 8. Validate data quality
+            validate_cot_weekly(conn)
+
+            # Stats for notification (query while connection is open)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM dbo.cot_weekly")
+            total_rows = cursor.fetchone()[0]
+            cursor.execute("SELECT MAX(report_date) FROM dbo.cot_weekly")
+            latest_report_date = cursor.fetchone()[0]
+
+        log.info("=" * 60)
+        log.info(f"COT ETL COMPLETE  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log.info("=" * 60)
+
+        send_etl_notification(
+            hub="COT Positioning",
+            status="SUCCESS",
+            rows_written=total_rows,
+            latest_data_date=str(latest_report_date),
+            duration_seconds=time.time() - start_time,
+            warnings=etl_warnings,
+            extra_lines=[
+                "Instruments processed: 12",
+                f"Z-scores computed: {total_rows}",
+            ],
+        )
+
+    except Exception as e:
+        send_etl_notification(
+            hub="COT Positioning",
+            status="FAILED",
+            duration_seconds=time.time() - start_time,
+            errors=[str(e)],
+        )
+        raise
 
 
 if __name__ == "__main__":
